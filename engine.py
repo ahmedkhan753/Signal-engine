@@ -1,113 +1,135 @@
-def detect_conflicts(signals):
-    conflicts = []
-    
-    stability = signals.get('system_stability')
-    error_rate = signals.get('error_rate')
-    security_threat = signals.get('security_threat')
-    deployment_risk = signals.get('deployment_risk')
-    
-    if stability == 'HIGH' and error_rate == 'HIGH':
-        conflicts.append("Stability HIGH conflicts with Error Rate HIGH")
-    if stability == 'LOW' and error_rate == 'LOW':
-        conflicts.append("Stability LOW conflicts with Error Rate LOW")
-    if security_threat == 'HIGH' and deployment_risk == 'LOW':
-        conflicts.append("Security Threat HIGH conflicts with Deployment Risk LOW")
-        
-    return conflicts
+from facets import evaluate_facets
+from conflicts import detect_conflicts
+from formatter import format_cli_output
 
-def get_signal_display_name(key):
-    return key.replace("_", " ").capitalize()
-
-def calculate_score(signals, conflicts, trace_steps):
-    score = 100
-    
-    positive_signals = {'system_stability', 'network_reliability'}
-    negative_signals = {'error_rate', 'deployment_risk', 'security_threat', 'data_loss_risk'}
-    
-    for key, value in signals.items():
-        name = get_signal_display_name(key)
-        if key in positive_signals:
-            if value == 'HIGH':
-                trace_steps.append(f"{name} is HIGH -> no penalty")
-            elif value == 'MEDIUM':
-                score -= 5
-                trace_steps.append(f"{name} is MEDIUM -> -5")
-            elif value == 'LOW':
-                score -= 10
-                trace_steps.append(f"{name} is LOW -> -10")
-        elif key in negative_signals:
-            if value == 'HIGH':
-                score -= 15
-                trace_steps.append(f"{name} is HIGH -> -15")
-            elif value == 'MEDIUM':
-                score -= 8
-                trace_steps.append(f"{name} is MEDIUM -> -8")
-            elif value == 'LOW':
-                trace_steps.append(f"{name} is LOW -> no penalty")
-        else:
-            trace_steps.append(f"{name} is {value} -> no penalty")
-                
-    for conflict in conflicts:
-        score -= 8
-        trace_steps.append("Conflict detected -> -8")
-        
-    return max(0, min(100, score))
-
-def make_decision(score):
-    if score >= 70:
-        return 'ALLOW'
+def compute_risk_level(score, conflicts):
+    # Base risk level from score
+    if score >= 85:
+        risk = "LOW"
+    elif score >= 70:
+        risk = "MODERATE"
     elif score >= 40:
-        return 'DELAY'
-    return 'BLOCK'
-
-def generate_trace(scenario_name, score, decision, conflicts, trace_steps):
-    lines = []
-    lines.append("=" * 40)
-    lines.append(f"SCENARIO: {scenario_name}")
-    lines.append("=" * max(40, len(f"SCENARIO: {scenario_name}")))
-    lines.append("")
-    lines.append(f"Alignment Score: {score} / 100")
-    lines.append(f"Decision: {decision}")
-    
-    if score < 100:
-        if conflicts:
-            lines.append(f"Alignment Change: 100 -> {score} (drop due to conflicts)")
-        else:
-            lines.append(f"Alignment Change: 100 -> {score} (drop due to penalties)")
+        risk = "HIGH"
     else:
-        lines.append("Alignment Change: 100 -> 100 (Perfect alignment)")
+        risk = "CRITICAL"
         
-    lines.append("")
+    # Escalation from conflicts
+    for c in conflicts:
+        if c["severity"] == "CRITICAL":
+            return "CRITICAL"
+        elif c["severity"] == "HIGH" and risk in ("LOW", "MODERATE"):
+            risk = "HIGH"
+            
+    return risk
+
+def make_decision(score, risk_level, conflicts):
+    # Hard constraints logic
+    if risk_level == "CRITICAL":
+        return "BLOCK"
+        
+    for c in conflicts:
+        if c["severity"] == "CRITICAL":
+            return "BLOCK"
+            
+    if score >= 70:
+        return "ALLOW"
+    elif score >= 40:
+        return "DELAY"
+    return "BLOCK"
     
-    if conflicts:
-        lines.append("Conflicts Detected:")
-        for c in conflicts:
-            lines.append(f"- {c}")
-        lines.append("")
-        
-    lines.append("Trace:")
-    for step in trace_steps:
-        lines.append(f"- {step}")
-        
-    lines.append(f"- Final score = {score} -> {decision}")
-    lines.append("")
-    lines.append("=" * 40)
-    lines.append("")
+def get_decision_summary_and_result(decision, risk_level, conflicts):
+    if decision == "ALLOW":
+        return "Execution allowed: system conditions are stable and aligned.", "Execution allowed."
+    elif decision == "DELAY":
+        if conflicts:
+            return "Execution delayed: conflicting signals introduce uncertainty and elevated risk.", "Execution delayed due to conflicting signals."
+        else:
+            return "Execution delayed: local operational indicators present elevated risk.", "Execution delayed due to operational instability."
+    else:
+        if risk_level == "CRITICAL" or any(c["severity"] == "CRITICAL" for c in conflicts):
+            return "Execution blocked: critical hard constraint or security breach detected.", "Execution blocked due to critical hard constraint."
+        else:
+            return "Execution blocked: multiple critical risk signals detected.", "Execution blocked due to critical system risk."
+
+def generate_global_trace(facets_result, conflicts, decision):
+    trace = []
     
-    return "\n".join(lines)
+    for f in facets_result:
+        if f["status"] == "DEGRADED":
+            trace.append(f"Degraded {f['facet']} indicators reduced overall confidence.")
+        elif f["status"] == "CRITICAL":
+            trace.append(f"Critical drop in {f['facet']} introduced severe operational instability.")
+            
+    for c in conflicts:
+        if c["severity"] == "CRITICAL":
+            trace.append(f"Hard constraint violation triggered: {c['message']}")
+        else:
+            trace.append(f"Contradictory signals detected: {c['message']}")
+            
+    if not trace:
+        trace.append("All operational facets indicate healthy system state.")
+        
+    trace.append(f"Final operational posture resulted in {decision}.")
+    return trace
 
 def evaluate_signals(scenario_name, signals):
-    trace_steps = []
+    # 1. Evaluate facets
+    facets_result = evaluate_facets(signals)
     
+    # 2. Base global score is average of facet scores
+    if facets_result:
+        avg_facet_score = sum(f["score"] for f in facets_result) / len(facets_result)
+    else:
+        avg_facet_score = 100
+        
+    score = avg_facet_score
+    
+    # 3. Detect conflicts
     conflicts = detect_conflicts(signals)
-    score = calculate_score(signals, conflicts, trace_steps)
-    decision = make_decision(score)
     
-    trace_output = generate_trace(scenario_name, score, decision, conflicts, trace_steps)
+    # 4. Apply conflict penalties
+    for c in conflicts:
+        score -= c["penalty"]
+        
+    score = max(0, min(100, int(score)))
+    
+    # 5. Compute Risk & Decision
+    risk_level = compute_risk_level(score, conflicts)
+    decision = make_decision(score, risk_level, conflicts)
+    
+    # 6. Generate Summaries & Trace
+    decision_summary, result_summary = get_decision_summary_and_result(decision, risk_level, conflicts)
+    global_trace = generate_global_trace(facets_result, conflicts, decision)
+    
+    # 7. Alignment change reasoning
+    if score == 100:
+        reason = "perfect alignment"
+    elif conflicts:
+        if any(c["severity"] == "CRITICAL" for c in conflicts):
+            reason = "critical hard constraint violation"
+        else:
+            reason = "severe operational contradictions detected"
+    else:
+        reason = "elevated operational risk factors"
+        
+    response = {
+        "scenario": scenario_name,
+        "system_alignment_score": score,
+        "decision": decision,
+        "risk_level": risk_level,
+        "decision_summary": decision_summary,
+        "alignment_change": {
+            "initial": 100,
+            "final": score,
+            "reason": reason
+        },
+        "conflicts": conflicts,
+        "facets": facets_result,
+        "global_trace": global_trace,
+        "result": result_summary
+    }
+    
+    trace_output = format_cli_output(response)
     print(trace_output)
     
-    return {
-        "score": score,
-        "decision": decision,
-        "conflicts": conflicts
-    }
+    return response
