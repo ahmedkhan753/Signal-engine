@@ -38,6 +38,20 @@
  *
  * @typedef {{ initial: number; final: number; reason: string }} GovernanceApiAlignmentChange
  *
+ * @typedef {'STABLE'|'CONTRADICTORY'|'DEGRADED'|'RECOVERY_PENDING'|'CONSTRAINT_LOCKED'|'HUMAN_REVIEW_REQUIRED'} GovernanceRuntimeState
+ *
+ * @typedef {'CONTINUE'|'DELAY_AND_REVIEW'|'ESCALATE_TO_OPERATOR'|'BLOCK_EXECUTION'|'VALIDATE_RECOVERY'|'MONITOR_FOR_DRIFT'|'VALIDATE_READINESS'} GovernanceRecommendedAction
+ *
+ * @typedef {{ code: string; label: string }} GovernanceTimelineEvent
+ *
+ * @typedef {{
+ *   triggering_signals: Array<{facet: string; signal: string; value: string; penalty: number}>;
+ *   triggering_conflicts: GovernanceApiConflict[];
+ *   risk_basis: { final: string; base_from_score: string; escalated_by: string[] };
+ *   decision_basis: string;
+ *   recommended_action_basis: string;
+ * }} GovernanceEvidencePacket
+ *
  * @typedef {{
  *   scenario_id: string;
  *   scenario_name: string;
@@ -54,6 +68,10 @@
  *   global_trace: string[];
  *   technical_trace: string[];
  *   hard_constraint_triggered: boolean;
+ *   runtime_state: GovernanceRuntimeState;
+ *   recommended_action: GovernanceRecommendedAction;
+ *   timeline_events: GovernanceTimelineEvent[];
+ *   evidence_packet: GovernanceEvidencePacket;
  * }} GovernanceApiResponse
  */
 

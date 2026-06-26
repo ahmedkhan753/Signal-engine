@@ -2,7 +2,11 @@
 
 **Phase:** Integration completion + stabilization (Day 2)
 **Status:** Complete — all 8 scenarios wired, validated, and deterministic.
-**Date:** 2026-05-24
+**Date:** 2026-05-29
+
+> The canonical engineering handoff doc is [V2_HANDOFF.md](V2_HANDOFF.md).
+> This file is the deeper integration walkthrough — file-by-file scope and the
+> frontend ↔ backend field-mapping table.
 
 ---
 
@@ -20,11 +24,16 @@ api.py  (Flask API layer, :8000)
 engine.py · facets.py · conflicts.py · formatter.py   (untouched)
 ```
 
-- All 8 scenarios are wired and selectable from the dashboard.
+- All 9 scenarios are wired and selectable from the dashboard (8 V2 +
+  `recovery_validation` added in V3 Phase 1).
 - All four governance paths render correctly (`SAFE`, `CAUTION`, `STOP`, plus
   the explicit *hard-constraint* indicator).
 - Output is byte-identical across repeated runs (verified in tests).
 - No database, no auth, no persistence, no new governance logic.
+- V3 Phase 1 adds four additive response fields (`runtime_state`,
+  `recommended_action`, `timeline_events`, `evidence_packet`) — derived in the
+  API layer, not the engine. See
+  [V2_HANDOFF.md §13](V2_HANDOFF.md#13-v3-phase-1--runtime-governance-layer-additive).
 
 ---
 
@@ -68,7 +77,8 @@ The field names below are **stable** and can be relied on by the frontend.
     { "scenario_id": "hidden_instability",          "scenario_name": "Hidden Instability",          "demo_step": "Conflict",   "demo_order": 2 },
     { "scenario_id": "cascading_degradation",       "scenario_name": "Cascading Degradation",       "demo_step": "Escalation", "demo_order": 3 },
     { "scenario_id": "policy_constraint_violation", "scenario_name": "Policy Constraint Violation", "demo_step": "Block",      "demo_order": 4 },
-    { "scenario_id": "observability_disagreement",  "scenario_name": "Observability Disagreement",  "demo_step": null,         "demo_order": null }
+    { "scenario_id": "observability_disagreement",  "scenario_name": "Observability Disagreement",  "demo_step": null,         "demo_order": null },
+    { "scenario_id": "recovery_validation",         "scenario_name": "Recovery Validation",         "demo_step": null,         "demo_order": null }
     // ...
   ]
 }
@@ -157,6 +167,10 @@ Errors:
 | `operationalTrace` | `global_trace` | Joined sentences. |
 | `technicalTrace` | `technical_trace` | Joined per-facet point-deduction breakdown. |
 | `hardConstraintTriggered` | `hard_constraint_triggered` | Renders the red `⚠ Hard constraint triggered` chip. |
+| `runtimeState` | `runtime_state` | V3 — pass-through enum. Renders the `Runtime · …` chip (colour-tinted by state). |
+| `recommendedAction` | `recommended_action` | V3 — pass-through enum. Renders the `Action · …` chip. |
+| `timelineEvents` | `timeline_events` | V3 — `{code, label}[]`. Carried on the view model for a future timeline panel. |
+| `evidencePacket` | `evidence_packet` | V3 — pass-through. Carried on the view model for a future evidence panel. |
 
 ---
 
@@ -165,16 +179,17 @@ Errors:
 Captured against the live engine (`python test_backend.py` re-asserts these
 every run; drift breaks the build).
 
-| `scenario_id` | Score | Decision | Status | Risk | Conflicts | Hard | Demo step |
-|---|---:|---|---|---|---:|---|---|
-| `stable_deployment`           | 100 | ALLOW | SAFE    | LOW      | 0 | — | Normal |
-| `hidden_instability`          |  72 | ALLOW | SAFE    | HIGH     | 1 | — | Conflict |
-| `observability_disagreement`  |  75 | ALLOW | SAFE    | HIGH     | 1 | — | — |
-| `orchestration_conflict`      |  77 | ALLOW | SAFE    | HIGH     | 1 | — | — |
-| `security_concern`            |  96 | ALLOW | SAFE    | LOW      | 0 | — | — |
-| `rollback_trigger`            |  68 | DELAY | CAUTION | HIGH     | 1 | — | — |
-| `cascading_degradation`       |  63 | DELAY | CAUTION | HIGH     | 1 | — | Escalation |
-| `policy_constraint_violation` |   0 | BLOCK | STOP    | CRITICAL | 2 | ✓ | Block |
+| `scenario_id` | Score | Decision | Status | Risk | Conflicts | Hard | Demo step | `runtime_state` | `recommended_action` |
+|---|---:|---|---|---|---:|---|---|---|---|
+| `stable_deployment`           | 100 | ALLOW | SAFE    | LOW      | 0 | — | Normal     | `STABLE`            | `CONTINUE` |
+| `hidden_instability`          |  72 | DELAY | CAUTION | HIGH     | 1 | — | Conflict   | `CONTRADICTORY`     | `DELAY_AND_REVIEW` |
+| `observability_disagreement`  |  75 | DELAY | CAUTION | HIGH     | 1 | — | —          | `CONTRADICTORY`     | `DELAY_AND_REVIEW` |
+| `orchestration_conflict`      |  77 | DELAY | CAUTION | HIGH     | 1 | — | —          | `CONTRADICTORY`     | `VALIDATE_READINESS` |
+| `rollback_trigger`            |  68 | DELAY | CAUTION | HIGH     | 1 | — | —          | `DEGRADED`          | `ESCALATE_TO_OPERATOR` |
+| `cascading_degradation`       |  63 | DELAY | CAUTION | HIGH     | 1 | — | Escalation | `DEGRADED`          | `ESCALATE_TO_OPERATOR` |
+| `security_concern`            |  96 | ALLOW | SAFE    | LOW      | 0 | — | —          | `STABLE`            | `MONITOR_FOR_DRIFT` |
+| `policy_constraint_violation` |   0 | BLOCK | STOP    | CRITICAL | 2 | ✓ | Block      | `CONSTRAINT_LOCKED` | `BLOCK_EXECUTION` |
+| `recovery_validation`         |  74 | DELAY | CAUTION | HIGH     | 1 | — | —          | `RECOVERY_PENDING`  | `VALIDATE_RECOVERY` |
 
 ---
 
@@ -184,25 +199,24 @@ These are **engine calibration observations** — the integration faithfully
 displays whatever the engine emits. Adjusting these is governance work, not
 integration work, and was explicitly out of scope.
 
-1. **`hidden_instability` evaluates to ALLOW (72), not DELAY.** The score sits
-   one point above the `DELAY` threshold; the HIGH-severity conflict + HIGH
-   risk are visible to the operator but the decision is `ALLOW`. The brief
-   originally named this scenario as the DELAY proof; the third demo step is
-   instead `cascading_degradation` (63 → DELAY) so the CAUTION path is exercised.
+1. **HIGH risk + HIGH-severity conflict now escalates to DELAY at minimum.**
+   `hidden_instability` (72), `observability_disagreement` (75),
+   `orchestration_conflict` (77), and `rollback_trigger` (68) all sit at scores
+   that would have been `ALLOW` under a purely score-driven rule, but the
+   engine's coherence rule (`make_decision` in `engine.py`) requires `DELAY`
+   when `risk_level == HIGH` and there is at least one HIGH-severity conflict.
+   See [V2_HANDOFF.md §8](V2_HANDOFF.md#8-governance-calibration-rules) for the
+   full rule set and rationale.
 2. **`security_concern` evaluates to ALLOW (96) with zero conflicts.** A `HIGH`
    `security_threat` alone gives only a -15 facet penalty and triggers no
    cross-facet conflict, so the overall posture is `SAFE`. If `Security Concern`
    is meant to surface caution, either the conflict rules need a
    `security_threat=HIGH` clause or the facet penalty needs increasing.
-3. **5 of 8 scenarios → ALLOW.** `decision` is purely score-driven (`≥70=ALLOW`)
-   and ignores `risk_level`. Several scenarios therefore end up `ALLOW` while
-   the risk pill is `HIGH`. The dashboard surfaces this by showing both the
-   `Engine risk · HIGH` chip and the conflict count, so the contradiction is
-   visible — but if `risk_level=HIGH` should force a downgrade to `DELAY`, that
-   is an engine rule change.
-4. **Only `policy_constraint_violation` triggers a hard constraint.** It is the
-   only scenario today that exercises the `STOP` rendering path.
-5. **Per-signal confidence is uniform `1.0`.** The deterministic engine has no
+3. **`BLOCK` is reserved for critical escalation paths.** Only
+   `policy_constraint_violation` reaches BLOCK today — via two CRITICAL
+   conflicts (`active_breach=HIGH`, `policy_violation=HIGH`) that force
+   `risk_level=CRITICAL` and set `hard_constraint_triggered=true`.
+4. **Per-signal confidence is uniform `1.0`.** The deterministic engine has no
    telemetry-confidence concept, so every confidence bar is full and green. This
    is honest (deterministic = certain), but it makes the bars decorative rather
    than informative.
@@ -270,13 +284,13 @@ checks error paths (`400` / `404`).
 The dashboard's **Run demo** button cycles the canonical four-step flow:
 
 ```
-Normal              → ALLOW   / SAFE    / risk LOW
+Normal              → ALLOW / SAFE    / risk LOW
    (Stable Deployment)
-Conflict            → ALLOW   / SAFE    / risk HIGH  + 1 conflict
+Conflict            → DELAY / CAUTION / risk HIGH  + 1 conflict
    (Hidden Instability)
-Escalation          → DELAY   / CAUTION / risk HIGH  + 1 conflict
+Escalation          → DELAY / CAUTION / risk HIGH  + 1 conflict
    (Cascading Degradation)
-Hard Constraint Block → BLOCK / STOP    / risk CRITICAL + 2 conflicts + ⚠ hard constraint
+Hard Constraint Block → BLOCK / STOP  / risk CRITICAL + 2 conflicts + ⚠ hard constraint
    (Policy Constraint Violation)
 ```
 
@@ -290,14 +304,17 @@ flow.
 
 ## 10. Known remaining items (V-next, brief)
 
-- **Engine calibration** — see §6. Decide whether `hidden_instability` /
-  `security_concern` should escalate further.
-- **Persistence / history** — no scenario history is kept. A simple
-  in-memory ring buffer of recent evaluations would enable a timeline view.
+See [V2_HANDOFF.md §10–§12](V2_HANDOFF.md#10-known-limitations) for the full
+limitations list and V3 considerations. Headline items:
+
+- **Engine calibration** — `security_concern` (96 / ALLOW / zero conflicts)
+  remains a candidate for a `security_threat=HIGH` conflict rule.
+- **Persistence / history** — no scenario history is kept. Out of scope.
 - **`GET /scenarios` caching** — frontend currently fetches it once on mount.
   Fine for the prototype.
-- **Signal confidence** — if telemetry confidence becomes a governance concept,
-  the engine + contract + adapter need a shared definition.
+- **Signal confidence** — `conf` is always `1.0`. If telemetry confidence
+  becomes governance-relevant, the engine + contract + adapter need a shared
+  definition.
 - **Production hardening** — `app.run(...)` is the dev server. Production
   would need a real WSGI server (`gunicorn`/`waitress`) and a non-`*` CORS
-  origin. Out of scope for the prototype.
+  origin.

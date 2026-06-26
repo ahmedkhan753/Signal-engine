@@ -71,7 +71,11 @@ def get_facet_status_and_summary(facet_name, score, local_signals):
             return status, "Severe operational risk, rollback or policy breach detected."
             
     elif facet_name == "Security":
+        has_threat = local_signals.get("security_threat") in ("HIGH", "MEDIUM")
+        has_breach = local_signals.get("active_breach") in ("HIGH", "MEDIUM")
         if status == "HEALTHY":
+            if has_threat:
+                return status, "Elevated security threat noted but within governance tolerance."
             return status, "No active security threat detected."
         elif status == "DEGRADED":
             return status, "Elevated security threat detected requiring attention."

@@ -14,31 +14,48 @@ from scenarios import scenarios
 from api import (
     SCENARIO_METADATA,
     SCENARIO_REGISTRY,
+    RUNTIME_STATES,
+    RECOMMENDED_ACTIONS,
     _slugify,
     to_contract,
 )
 
-REQUIRED_CONTRACT_FIELDS = [
+# --- V2 contract (unchanged) ---
+V2_CONTRACT_FIELDS = [
     "scenario_id", "scenario_name", "alignment_score", "alignment_change",
     "decision", "risk_level", "overall_status", "reason", "decision_summary",
     "conflicts", "conflict_count", "facets", "global_trace", "technical_trace",
     "hard_constraint_triggered",
 ]
 
+# --- V3 Phase 1 (additive) ---
+V3_CONTRACT_FIELDS = [
+    "runtime_state", "recommended_action", "timeline_events", "evidence_packet",
+]
+
+REQUIRED_CONTRACT_FIELDS = V2_CONTRACT_FIELDS + V3_CONTRACT_FIELDS
+
 REQUIRED_FACET_FIELDS = ["id", "label", "status", "score", "summary", "trace", "signals"]
 REQUIRED_SIGNAL_FIELDS = ["source", "sourceLabel", "metric", "metricLabel",
                           "statusLabel", "icon", "value", "conf"]
 
+REQUIRED_EVIDENCE_FIELDS = [
+    "triggering_signals", "triggering_conflicts", "risk_basis",
+    "decision_basis", "recommended_action_basis",
+]
+
 # Expected deterministic engine output. Drift here means engine calibration changed.
+# V3: also asserts runtime_state / recommended_action per the V3 mapping spec.
 EXPECTED_MATRIX = {
-    "stable_deployment":           {"decision": "ALLOW", "status": "SAFE",    "risk": "LOW",      "score": 100, "conflicts": 0, "hard": False},
-    "hidden_instability":          {"decision": "ALLOW", "status": "SAFE",    "risk": "HIGH",     "score": 72,  "conflicts": 1, "hard": False},
-    "observability_disagreement":  {"decision": "ALLOW", "status": "SAFE",    "risk": "HIGH",     "score": 75,  "conflicts": 1, "hard": False},
-    "cascading_degradation":       {"decision": "DELAY", "status": "CAUTION", "risk": "HIGH",     "score": 63,  "conflicts": 1, "hard": False},
-    "orchestration_conflict":      {"decision": "ALLOW", "status": "SAFE",    "risk": "HIGH",     "score": 77,  "conflicts": 1, "hard": False},
-    "rollback_trigger":            {"decision": "DELAY", "status": "CAUTION", "risk": "HIGH",     "score": 68,  "conflicts": 1, "hard": False},
-    "security_concern":            {"decision": "ALLOW", "status": "SAFE",    "risk": "LOW",      "score": 96,  "conflicts": 0, "hard": False},
-    "policy_constraint_violation": {"decision": "BLOCK", "status": "STOP",    "risk": "CRITICAL", "score": 0,   "conflicts": 2, "hard": True},
+    "stable_deployment":           {"decision": "ALLOW", "status": "SAFE",    "risk": "LOW",      "score": 100, "conflicts": 0, "hard": False, "runtime": "STABLE",            "action": "CONTINUE"},
+    "hidden_instability":          {"decision": "DELAY", "status": "CAUTION", "risk": "HIGH",     "score": 72,  "conflicts": 1, "hard": False, "runtime": "CONTRADICTORY",     "action": "DELAY_AND_REVIEW"},
+    "observability_disagreement":  {"decision": "DELAY", "status": "CAUTION", "risk": "HIGH",     "score": 75,  "conflicts": 1, "hard": False, "runtime": "CONTRADICTORY",     "action": "DELAY_AND_REVIEW"},
+    "cascading_degradation":       {"decision": "DELAY", "status": "CAUTION", "risk": "HIGH",     "score": 63,  "conflicts": 1, "hard": False, "runtime": "DEGRADED",          "action": "ESCALATE_TO_OPERATOR"},
+    "orchestration_conflict":      {"decision": "DELAY", "status": "CAUTION", "risk": "HIGH",     "score": 77,  "conflicts": 1, "hard": False, "runtime": "CONTRADICTORY",     "action": "VALIDATE_READINESS"},
+    "rollback_trigger":            {"decision": "DELAY", "status": "CAUTION", "risk": "HIGH",     "score": 68,  "conflicts": 1, "hard": False, "runtime": "DEGRADED",          "action": "ESCALATE_TO_OPERATOR"},
+    "security_concern":            {"decision": "ALLOW", "status": "SAFE",    "risk": "LOW",      "score": 96,  "conflicts": 0, "hard": False, "runtime": "STABLE",            "action": "MONITOR_FOR_DRIFT"},
+    "policy_constraint_violation": {"decision": "BLOCK", "status": "STOP",    "risk": "CRITICAL", "score": 0,   "conflicts": 2, "hard": True,  "runtime": "CONSTRAINT_LOCKED", "action": "BLOCK_EXECUTION"},
+    "recovery_validation":         {"decision": "DELAY", "status": "CAUTION", "risk": "HIGH",     "score": 74,  "conflicts": 1, "hard": False, "runtime": "RECOVERY_PENDING",  "action": "VALIDATE_RECOVERY"},
 }
 
 failures = []
@@ -118,10 +135,66 @@ for sid, engine_response in engine_runs.items():
     check(f"{sid}: hard_constraint_triggered matches expected",
           contract["hard_constraint_triggered"] == expected["hard"])
 
-# --- 4. Slug / resolver edge cases ------------------------------------------
-print("\n[4] Slug + resolver")
+# --- 4. V3 runtime layer ----------------------------------------------------
+print("\n[4] V3 runtime layer (runtime_state, recommended_action, timeline_events, evidence_packet)")
+for sid, engine_response in engine_runs.items():
+    name = SCENARIO_REGISTRY[sid]
+    contract = to_contract(sid, name, engine_response)
+    expected = EXPECTED_MATRIX[sid]
+
+    # runtime_state / recommended_action enums + mappings
+    check(f"{sid}: runtime_state valid enum",
+          contract["runtime_state"] in RUNTIME_STATES,
+          str(contract["runtime_state"]))
+    check(f"{sid}: recommended_action valid enum",
+          contract["recommended_action"] in RECOMMENDED_ACTIONS,
+          str(contract["recommended_action"]))
+    check(f"{sid}: runtime_state matches expected",
+          contract["runtime_state"] == expected["runtime"],
+          f"{contract['runtime_state']} != {expected['runtime']}")
+    check(f"{sid}: recommended_action matches expected",
+          contract["recommended_action"] == expected["action"],
+          f"{contract['recommended_action']} != {expected['action']}")
+
+    # timeline_events shape
+    events = contract["timeline_events"]
+    check(f"{sid}: timeline_events is list", isinstance(events, list) and len(events) >= 5)
+    codes = [e.get("code") for e in events]
+    for required_code in ("REQUEST_RECEIVED", "FACETS_EVALUATED",
+                          "RUNTIME_STATE_ASSIGNED", "RECOMMENDED_ACTION_ASSIGNED",
+                          "DECISION_FINALIZED"):
+        check(f"{sid}: timeline has {required_code}", required_code in codes)
+    if expected["conflicts"] > 0:
+        check(f"{sid}: timeline has CONFLICT_ANALYZED", "CONFLICT_ANALYZED" in codes)
+    # RISK_ESCALATED iff the engine raised risk above the score-band base
+    if expected["risk"] != ("LOW" if expected["score"] >= 85 else
+                            "MODERATE" if expected["score"] >= 70 else
+                            "HIGH" if expected["score"] >= 40 else "CRITICAL"):
+        check(f"{sid}: timeline has RISK_ESCALATED", "RISK_ESCALATED" in codes)
+
+    # evidence_packet shape
+    evidence = contract["evidence_packet"]
+    check(f"{sid}: evidence_packet is dict", isinstance(evidence, dict))
+    for field in REQUIRED_EVIDENCE_FIELDS:
+        check(f"{sid}: evidence_packet.{field}", field in evidence)
+    check(f"{sid}: triggering_conflicts count matches",
+          len(evidence["triggering_conflicts"]) == expected["conflicts"])
+    check(f"{sid}: risk_basis.final matches contract risk",
+          evidence["risk_basis"]["final"] == contract["risk_level"])
+
+# --- 5. Slug / resolver edge cases ------------------------------------------
+print("\n[5] Slug + resolver")
 check("slugify normalizes spaces",   _slugify("Stable Deployment") == "stable_deployment")
 check("slugify strips and lowercases", _slugify("  Hidden Instability  ") == "hidden_instability")
+check("slugify recovers recovery_validation", _slugify("Recovery Validation") == "recovery_validation")
+
+# --- 6. V2 backward compatibility -------------------------------------------
+print("\n[6] V2 backward compatibility — all V2 fields present and unchanged")
+for sid, engine_response in engine_runs.items():
+    name = SCENARIO_REGISTRY[sid]
+    contract = to_contract(sid, name, engine_response)
+    for v2_field in V2_CONTRACT_FIELDS:
+        check(f"{sid}: V2 field {v2_field} preserved", v2_field in contract)
 
 # --- summary ---------------------------------------------------------------
 print(f"\n{'PASS: ALL BACKEND TESTS PASSED' if not failures else f'FAIL: {len(failures)} BACKEND TEST(S) FAILED'}")

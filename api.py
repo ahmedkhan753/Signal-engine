@@ -47,7 +47,182 @@ SCENARIO_METADATA = {
     "orchestration_conflict":      {"demo_step": None,          "demo_order": None},
     "rollback_trigger":            {"demo_step": None,          "demo_order": None},
     "security_concern":            {"demo_step": None,          "demo_order": None},
+    "recovery_validation":         {"demo_step": None,          "demo_order": None},
 }
+
+# --------------------------------------------------------------------------
+# V3 Phase 1 — Runtime governance layer (additive, deterministic).
+#
+# These add four new fields to every /evaluate response:
+#   runtime_state, recommended_action, timeline_events, evidence_packet
+#
+# No engine logic is altered. Mappings are keyed by scenario_id and remain
+# fully deterministic. A small fallback derives the same fields from engine
+# output for any new scenario without an explicit mapping.
+# --------------------------------------------------------------------------
+
+RUNTIME_STATES = (
+    "STABLE", "CONTRADICTORY", "DEGRADED",
+    "RECOVERY_PENDING", "CONSTRAINT_LOCKED", "HUMAN_REVIEW_REQUIRED",
+)
+
+RECOMMENDED_ACTIONS = (
+    "CONTINUE", "DELAY_AND_REVIEW", "ESCALATE_TO_OPERATOR",
+    "BLOCK_EXECUTION", "VALIDATE_RECOVERY",
+    "MONITOR_FOR_DRIFT", "VALIDATE_READINESS",
+)
+
+# Per-scenario runtime mapping. Deterministic by scenario_id.
+SCENARIO_RUNTIME_MAPPING = {
+    "stable_deployment":           ("STABLE",           "CONTINUE"),
+    "hidden_instability":          ("CONTRADICTORY",    "DELAY_AND_REVIEW"),
+    "observability_disagreement":  ("CONTRADICTORY",    "DELAY_AND_REVIEW"),
+    "orchestration_conflict":      ("CONTRADICTORY",    "VALIDATE_READINESS"),
+    "rollback_trigger":            ("DEGRADED",         "ESCALATE_TO_OPERATOR"),
+    "cascading_degradation":       ("DEGRADED",         "ESCALATE_TO_OPERATOR"),
+    "security_concern":            ("STABLE",           "MONITOR_FOR_DRIFT"),
+    "policy_constraint_violation": ("CONSTRAINT_LOCKED", "BLOCK_EXECUTION"),
+    "recovery_validation":         ("RECOVERY_PENDING", "VALIDATE_RECOVERY"),
+}
+
+
+def _base_risk_from_score(score):
+    """Risk band from score alone — the input to the engine's conflict escalation."""
+    if score >= 85:
+        return "LOW"
+    if score >= 70:
+        return "MODERATE"
+    if score >= 40:
+        return "HIGH"
+    return "CRITICAL"
+
+
+def _decision_basis(engine_response):
+    """Identifies which rule in engine.make_decision produced the final decision."""
+    conflicts = engine_response["conflicts"]
+    risk = engine_response["risk_level"]
+    score = engine_response["system_alignment_score"]
+    if any(c["severity"] == "CRITICAL" for c in conflicts):
+        return "critical_hard_constraint"
+    if risk == "CRITICAL":
+        return "critical_risk_band"
+    if risk == "HIGH" and any(c["severity"] == "HIGH" for c in conflicts):
+        return "high_risk_high_conflict_escalation"
+    if score >= 70:
+        return "score_band_allow"
+    if score >= 40:
+        return "score_band_delay"
+    return "score_band_block"
+
+
+def derive_runtime_state_and_action(scenario_id, engine_response):
+    """
+    Return (runtime_state, recommended_action, basis_label).
+    Primary path: per-scenario mapping. Fallback: derive from engine output.
+    """
+    if scenario_id in SCENARIO_RUNTIME_MAPPING:
+        state, action = SCENARIO_RUNTIME_MAPPING[scenario_id]
+        return state, action, "scenario_mapping"
+
+    # Deterministic fallback — keeps the layer principled if a new scenario
+    # is added without an explicit mapping.
+    conflicts = engine_response["conflicts"]
+    decision = engine_response["decision"]
+    hard = any(c["severity"] == "CRITICAL" for c in conflicts)
+    if hard:
+        return "CONSTRAINT_LOCKED", "BLOCK_EXECUTION", "derived_from_engine"
+    if decision == "BLOCK":
+        return "DEGRADED", "ESCALATE_TO_OPERATOR", "derived_from_engine"
+    if decision == "DELAY":
+        if any(c["severity"] == "HIGH" for c in conflicts):
+            return "CONTRADICTORY", "DELAY_AND_REVIEW", "derived_from_engine"
+        return "DEGRADED", "ESCALATE_TO_OPERATOR", "derived_from_engine"
+    return "STABLE", "CONTINUE", "derived_from_engine"
+
+
+def build_timeline_events(scenario_name, engine_response, runtime_state, recommended_action):
+    """
+    Milestone-level deterministic timeline. One event per governance phase,
+    never one per signal. Operator-readable.
+    """
+    score = engine_response["system_alignment_score"]
+    decision = engine_response["decision"]
+    risk_level = engine_response["risk_level"]
+    conflicts = engine_response["conflicts"]
+    base_risk = _base_risk_from_score(score)
+
+    events = [
+        {"code": "REQUEST_RECEIVED",
+         "label": f"Evaluation request accepted for scenario '{scenario_name}'."},
+        {"code": "FACETS_EVALUATED",
+         "label": f"{len(engine_response['facets'])} facets evaluated; alignment score {score}/100."},
+    ]
+    if conflicts:
+        severities = ",".join(c["severity"] for c in conflicts)
+        events.append({
+            "code": "CONFLICT_ANALYZED",
+            "label": f"{len(conflicts)} conflict(s) detected (severities: {severities}).",
+        })
+    if risk_level != base_risk:
+        events.append({
+            "code": "RISK_ESCALATED",
+            "label": f"Risk escalated from base {base_risk} to {risk_level} by conflict severity.",
+        })
+    events.append({
+        "code": "RUNTIME_STATE_ASSIGNED",
+        "label": f"Runtime state assigned: {runtime_state}.",
+    })
+    events.append({
+        "code": "RECOMMENDED_ACTION_ASSIGNED",
+        "label": f"Recommended action: {recommended_action}.",
+    })
+    events.append({
+        "code": "DECISION_FINALIZED",
+        "label": f"Final decision: {decision}.",
+    })
+    return events
+
+
+def build_evidence_packet(scenario_id, engine_response, action_basis):
+    """
+    Structured governance evidence. Only facts already present in the
+    evaluation; no generated narrative.
+    """
+    conflicts = engine_response["conflicts"]
+    score = engine_response["system_alignment_score"]
+    risk = engine_response["risk_level"]
+    base_risk = _base_risk_from_score(score)
+
+    # Triggering signals = those that contributed any penalty in any facet.
+    triggering_signals = []
+    for facet in engine_response["facets"]:
+        for sig_name, value in facet.get("signals", {}).items():
+            penalty, _ = evaluate_signal(sig_name, value)
+            if penalty > 0:
+                triggering_signals.append({
+                    "facet": facet["facet"],
+                    "signal": sig_name,
+                    "value": value,
+                    "penalty": penalty,
+                })
+
+    triggering_conflicts = [
+        {"severity": c["severity"], "message": c["message"]} for c in conflicts
+    ]
+
+    risk_basis = {
+        "final": risk,
+        "base_from_score": base_risk,
+        "escalated_by": [c["severity"] for c in conflicts] if risk != base_risk else [],
+    }
+
+    return {
+        "triggering_signals": triggering_signals,
+        "triggering_conflicts": triggering_conflicts,
+        "risk_basis": risk_basis,
+        "decision_basis": _decision_basis(engine_response),
+        "recommended_action_basis": action_basis,
+    }
 
 # Per-signal display icons (presentation only — not governance data).
 SIGNAL_ICONS = {
@@ -146,11 +321,24 @@ def build_technical_trace(engine_response):
 
 
 def to_contract(scenario_id, scenario_name, engine_response):
-    """Reshape the engine response into the stable API contract."""
+    """Reshape the engine response into the stable API contract.
+
+    V2 fields are unchanged. V3 Phase 1 adds four additive fields:
+    runtime_state, recommended_action, timeline_events, evidence_packet.
+    """
     conflicts = engine_response["conflicts"]
     decision = engine_response["decision"]
 
+    runtime_state, recommended_action, action_basis = derive_runtime_state_and_action(
+        scenario_id, engine_response
+    )
+    timeline_events = build_timeline_events(
+        scenario_name, engine_response, runtime_state, recommended_action
+    )
+    evidence_packet = build_evidence_packet(scenario_id, engine_response, action_basis)
+
     return {
+        # --- V2 contract (unchanged) ---
         "scenario_id": scenario_id,
         "scenario_name": scenario_name,
         "alignment_score": engine_response["system_alignment_score"],
@@ -169,6 +357,11 @@ def to_contract(scenario_id, scenario_name, engine_response):
         "global_trace": engine_response["global_trace"],
         "technical_trace": build_technical_trace(engine_response),
         "hard_constraint_triggered": any(c["severity"] == "CRITICAL" for c in conflicts),
+        # --- V3 Phase 1 (additive, deterministic) ---
+        "runtime_state": runtime_state,
+        "recommended_action": recommended_action,
+        "timeline_events": timeline_events,
+        "evidence_packet": evidence_packet,
     }
 
 

@@ -38,7 +38,7 @@ def detect_conflicts(signals):
     if signals.get("deployment_readiness") == "HIGH" and signals.get("orchestration_readiness") in ("LOW", "MEDIUM"):
         conflicts.append({
             "severity": "HIGH",
-            "message": "Deployment authorization paused because orchestration readiness conflicted with deployment signals.",
+            "message": "Deployment readiness conflicts with orchestration capability, introducing execution uncertainty.",
             "penalty": 20
         })
         
@@ -46,7 +46,7 @@ def detect_conflicts(signals):
         if signals.get("infrastructure_stability") == "HIGH":
             conflicts.append({
                 "severity": "HIGH",
-                "message": "Execution delayed because observability indicators conflict with service stability metrics.",
+                "message": "Observability indicators conflict with reported infrastructure stability.",
                 "penalty": 20
             })
         else:

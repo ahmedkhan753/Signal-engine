@@ -49,5 +49,12 @@ scenarios = {
         "policy_violation": "HIGH",
         "active_breach": "HIGH",
         "deployment_readiness": "HIGH"
+    },
+    "Recovery Validation": {
+        "infrastructure_stability": "HIGH",
+        "deployment_readiness": "HIGH",
+        "orchestration_readiness": "MEDIUM",
+        "error_rate": "MEDIUM",
+        "service_latency": "MEDIUM"
     }
 }

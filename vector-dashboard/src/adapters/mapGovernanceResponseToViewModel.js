@@ -33,8 +33,47 @@ export function mapGovernanceResponseToViewModel(raw) {
     operationalTrace: joinTrace(safe.global_trace),
     technicalTrace: joinTrace(safe.technical_trace),
     hardConstraintTriggered: Boolean(safe.hard_constraint_triggered),
+    // V3 Phase 1 — backend-owned runtime governance state. Pass-through only.
+    runtimeState: normalizeRuntimeState(safe.runtime_state),
+    recommendedAction: normalizeRecommendedAction(safe.recommended_action),
+    timelineEvents: normalizeTimelineEvents(safe.timeline_events),
+    evidencePacket: safe.evidence_packet && typeof safe.evidence_packet === 'object'
+      ? safe.evidence_packet
+      : null,
     signals: [],
   }
+}
+
+const RUNTIME_STATE_ENUM = new Set([
+  'STABLE', 'CONTRADICTORY', 'DEGRADED',
+  'RECOVERY_PENDING', 'CONSTRAINT_LOCKED', 'HUMAN_REVIEW_REQUIRED',
+])
+const RECOMMENDED_ACTION_ENUM = new Set([
+  'CONTINUE', 'DELAY_AND_REVIEW', 'ESCALATE_TO_OPERATOR',
+  'BLOCK_EXECUTION', 'VALIDATE_RECOVERY',
+  'MONITOR_FOR_DRIFT', 'VALIDATE_READINESS',
+])
+
+function normalizeRuntimeState(s) {
+  const u = String(s || '').toUpperCase()
+  return RUNTIME_STATE_ENUM.has(u) ? u : 'STABLE'
+}
+
+function normalizeRecommendedAction(a) {
+  const u = String(a || '').toUpperCase()
+  return RECOMMENDED_ACTION_ENUM.has(u) ? u : 'CONTINUE'
+}
+
+function normalizeTimelineEvents(events) {
+  if (!Array.isArray(events)) return []
+  return events
+    .map((e) => {
+      if (!e || typeof e !== 'object') return null
+      const code = String(e.code ?? '')
+      const label = String(e.label ?? '')
+      return code ? { code, label } : null
+    })
+    .filter(Boolean)
 }
 
 function normalizeAlignmentChange(change, fallbackScore) {

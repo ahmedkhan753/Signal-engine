@@ -19,17 +19,29 @@ import { mapGovernanceResponseToViewModel } from '../src/adapters/mapGovernanceR
 
 const API_BASE_URL = process.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
-/** Expected deterministic governance matrix — used to detect engine calibration drift. */
+/** Expected deterministic governance matrix — used to detect engine calibration drift.
+ *  V3 Phase 1: also asserts runtime_state and recommended_action per scenario. */
 const EXPECTED = {
-  stable_deployment:           { decision: 'ALLOW', alignment: 'SAFE',    risk: 'low',    score: 100, conflicts: 0, hard: false },
-  hidden_instability:          { decision: 'ALLOW', alignment: 'SAFE',    risk: 'high',   score: 72,  conflicts: 1, hard: false },
-  observability_disagreement:  { decision: 'ALLOW', alignment: 'SAFE',    risk: 'high',   score: 75,  conflicts: 1, hard: false },
-  cascading_degradation:       { decision: 'DELAY', alignment: 'CAUTION', risk: 'high',   score: 63,  conflicts: 1, hard: false },
-  orchestration_conflict:      { decision: 'ALLOW', alignment: 'SAFE',    risk: 'high',   score: 77,  conflicts: 1, hard: false },
-  rollback_trigger:            { decision: 'DELAY', alignment: 'CAUTION', risk: 'high',   score: 68,  conflicts: 1, hard: false },
-  security_concern:            { decision: 'ALLOW', alignment: 'SAFE',    risk: 'low',    score: 96,  conflicts: 0, hard: false },
-  policy_constraint_violation: { decision: 'BLOCK', alignment: 'STOP',    risk: 'high',   score: 0,   conflicts: 2, hard: true  },
+  stable_deployment:           { decision: 'ALLOW', alignment: 'SAFE',    risk: 'low',  score: 100, conflicts: 0, hard: false, runtime: 'STABLE',            action: 'CONTINUE' },
+  hidden_instability:          { decision: 'DELAY', alignment: 'CAUTION', risk: 'high', score: 72,  conflicts: 1, hard: false, runtime: 'CONTRADICTORY',     action: 'DELAY_AND_REVIEW' },
+  observability_disagreement:  { decision: 'DELAY', alignment: 'CAUTION', risk: 'high', score: 75,  conflicts: 1, hard: false, runtime: 'CONTRADICTORY',     action: 'DELAY_AND_REVIEW' },
+  cascading_degradation:       { decision: 'DELAY', alignment: 'CAUTION', risk: 'high', score: 63,  conflicts: 1, hard: false, runtime: 'DEGRADED',          action: 'ESCALATE_TO_OPERATOR' },
+  orchestration_conflict:      { decision: 'DELAY', alignment: 'CAUTION', risk: 'high', score: 77,  conflicts: 1, hard: false, runtime: 'CONTRADICTORY',     action: 'VALIDATE_READINESS' },
+  rollback_trigger:            { decision: 'DELAY', alignment: 'CAUTION', risk: 'high', score: 68,  conflicts: 1, hard: false, runtime: 'DEGRADED',          action: 'ESCALATE_TO_OPERATOR' },
+  security_concern:            { decision: 'ALLOW', alignment: 'SAFE',    risk: 'low',  score: 96,  conflicts: 0, hard: false, runtime: 'STABLE',            action: 'MONITOR_FOR_DRIFT' },
+  policy_constraint_violation: { decision: 'BLOCK', alignment: 'STOP',    risk: 'high', score: 0,   conflicts: 2, hard: true,  runtime: 'CONSTRAINT_LOCKED', action: 'BLOCK_EXECUTION' },
+  recovery_validation:         { decision: 'DELAY', alignment: 'CAUTION', risk: 'high', score: 74,  conflicts: 1, hard: false, runtime: 'RECOVERY_PENDING',  action: 'VALIDATE_RECOVERY' },
 }
+
+const RUNTIME_STATES = new Set([
+  'STABLE', 'CONTRADICTORY', 'DEGRADED',
+  'RECOVERY_PENDING', 'CONSTRAINT_LOCKED', 'HUMAN_REVIEW_REQUIRED',
+])
+const RECOMMENDED_ACTIONS = new Set([
+  'CONTINUE', 'DELAY_AND_REVIEW', 'ESCALATE_TO_OPERATOR',
+  'BLOCK_EXECUTION', 'VALIDATE_RECOVERY',
+  'MONITOR_FOR_DRIFT', 'VALIDATE_READINESS',
+])
 
 async function getJson(path, init) {
   const res = await fetch(`${API_BASE_URL}${path}`, init)
@@ -48,11 +60,19 @@ function evaluate(scenarioId) {
   })
 }
 
-const REQUIRED_CONTRACT_FIELDS = [
+const V2_CONTRACT_FIELDS = [
   'scenario_id', 'scenario_name', 'alignment_score', 'alignment_change',
   'decision', 'risk_level', 'overall_status', 'reason', 'decision_summary',
   'conflicts', 'conflict_count', 'facets', 'global_trace', 'technical_trace',
   'hard_constraint_triggered',
+]
+const V3_CONTRACT_FIELDS = [
+  'runtime_state', 'recommended_action', 'timeline_events', 'evidence_packet',
+]
+const REQUIRED_CONTRACT_FIELDS = [...V2_CONTRACT_FIELDS, ...V3_CONTRACT_FIELDS]
+const REQUIRED_EVIDENCE_FIELDS = [
+  'triggering_signals', 'triggering_conflicts', 'risk_basis',
+  'decision_basis', 'recommended_action_basis',
 ]
 
 let failures = 0
@@ -67,7 +87,7 @@ function check(label, ok, detail = '') {
 console.log('\n[1] /scenarios catalogue')
 const catalogue = await getJson('/scenarios')
 check('returns scenarios array', Array.isArray(catalogue.scenarios))
-check('lists all 8 wired scenarios', catalogue.scenarios.length === 8,
+check('lists all 9 wired scenarios', catalogue.scenarios.length === 9,
   `got ${catalogue.scenarios.length}`)
 const demoSteps = catalogue.scenarios
   .filter((s) => s.demo_step)
@@ -88,7 +108,9 @@ for (const scenario of catalogue.scenarios) {
 
   console.log(
     `  ● ${id.padEnd(30)} ${vm.decision.padEnd(5)} ${vm.alignment.padEnd(7)} ${String(vm.score).padStart(3)}  ` +
-    `risk=${vm.riskLabel}  conflicts=${vm.conflicts.length}${vm.hardConstraintTriggered ? '  [HARD CONSTRAINT]' : ''}`,
+    `risk=${vm.riskLabel.padEnd(8)} runtime=${String(raw.runtime_state).padEnd(18)} ` +
+    `action=${String(raw.recommended_action).padEnd(22)} conflicts=${vm.conflicts.length}` +
+    `${vm.hardConstraintTriggered ? '  [HARD CONSTRAINT]' : ''}`,
   )
 
   for (const field of REQUIRED_CONTRACT_FIELDS) {
@@ -107,6 +129,42 @@ for (const scenario of catalogue.scenarios) {
       `got ${vm.score}, expected ${expected.score}`)
     check(`${id}: conflict count matches expected`, vm.conflicts.length === expected.conflicts)
     check(`${id}: hard_constraint_triggered matches expected`, vm.hardConstraintTriggered === expected.hard)
+
+    // --- V3 Phase 1 assertions ---
+    check(`${id}: runtime_state in enum`, RUNTIME_STATES.has(raw.runtime_state),
+      String(raw.runtime_state))
+    check(`${id}: recommended_action in enum`, RECOMMENDED_ACTIONS.has(raw.recommended_action),
+      String(raw.recommended_action))
+    check(`${id}: runtime_state matches expected`, raw.runtime_state === expected.runtime,
+      `got ${raw.runtime_state}, expected ${expected.runtime}`)
+    check(`${id}: recommended_action matches expected`, raw.recommended_action === expected.action,
+      `got ${raw.recommended_action}, expected ${expected.action}`)
+    check(`${id}: vm.runtimeState exposed`, vm.runtimeState === expected.runtime,
+      `got ${vm.runtimeState}`)
+    check(`${id}: vm.recommendedAction exposed`, vm.recommendedAction === expected.action,
+      `got ${vm.recommendedAction}`)
+
+    check(`${id}: timeline_events is non-empty list`,
+      Array.isArray(raw.timeline_events) && raw.timeline_events.length >= 5)
+    const codes = (raw.timeline_events || []).map((e) => e && e.code)
+    for (const required of ['REQUEST_RECEIVED', 'FACETS_EVALUATED',
+      'RUNTIME_STATE_ASSIGNED', 'RECOMMENDED_ACTION_ASSIGNED', 'DECISION_FINALIZED']) {
+      check(`${id}: timeline has ${required}`, codes.includes(required))
+    }
+    if (expected.conflicts > 0) {
+      check(`${id}: timeline has CONFLICT_ANALYZED`, codes.includes('CONFLICT_ANALYZED'))
+    }
+
+    check(`${id}: evidence_packet is object`,
+      raw.evidence_packet && typeof raw.evidence_packet === 'object')
+    for (const field of REQUIRED_EVIDENCE_FIELDS) {
+      check(`${id}: evidence_packet.${field}`, field in raw.evidence_packet)
+    }
+    check(`${id}: evidence.triggering_conflicts count matches`,
+      Array.isArray(raw.evidence_packet.triggering_conflicts)
+      && raw.evidence_packet.triggering_conflicts.length === expected.conflicts)
+    check(`${id}: evidence.risk_basis.final matches contract risk`,
+      raw.evidence_packet.risk_basis.final === raw.risk_level)
   }
   for (const s of vm.facets.flatMap((f) => f.contributingSignals)) {
     check(`${id}: signal row well-formed`,

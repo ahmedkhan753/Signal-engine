@@ -58,7 +58,10 @@ function ConnectionBanner({ status, error }) {
 }
 
 /** Active-scenario chip + optional hard-constraint badge, inline-styled to preserve the existing header design. */
-function ActiveScenarioStrip({ scenarioTitle, riskLabel, hardConstraintTriggered, alignmentChange }) {
+function ActiveScenarioStrip({
+  scenarioTitle, riskLabel, hardConstraintTriggered, alignmentChange,
+  runtimeState, recommendedAction,
+}) {
   const chip = {
     display: 'inline-flex',
     alignItems: 'center',
@@ -74,6 +77,17 @@ function ActiveScenarioStrip({ scenarioTitle, riskLabel, hardConstraintTriggered
     background: 'rgba(13, 17, 23, 0.45)',
     lineHeight: 1.4,
   }
+  // V3 chip accents — colour is derived from the backend-owned runtime_state value,
+  // not from any frontend governance logic. Pure presentation.
+  const runtimeAccent = {
+    STABLE:               { color: '#9ee2b4', border: 'rgba(120, 220, 160, 0.45)', bg: 'rgba(40, 120, 70, 0.18)' },
+    CONTRADICTORY:        { color: '#f0c674', border: 'rgba(240, 198, 116, 0.45)', bg: 'rgba(140, 100, 30, 0.18)' },
+    DEGRADED:             { color: '#f0a675', border: 'rgba(240, 166, 117, 0.45)', bg: 'rgba(150, 80, 30, 0.18)' },
+    RECOVERY_PENDING:     { color: '#8ab4f8', border: 'rgba(138, 180, 248, 0.45)', bg: 'rgba(40, 80, 150, 0.18)' },
+    CONSTRAINT_LOCKED:    { color: '#FF8A8A', border: 'rgba(255, 92, 92, 0.45)',   bg: 'rgba(255, 92, 92, 0.12)' },
+    HUMAN_REVIEW_REQUIRED:{ color: '#d2b3ff', border: 'rgba(210, 179, 255, 0.45)', bg: 'rgba(90, 60, 150, 0.18)' },
+  }[runtimeState] || null
+
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', margin: '0 0 12px' }}>
       <span style={chip}>Scenario · {scenarioTitle}</span>
@@ -81,6 +95,21 @@ function ActiveScenarioStrip({ scenarioTitle, riskLabel, hardConstraintTriggered
       {alignmentChange && alignmentChange.initial !== alignmentChange.final && (
         <span style={chip}>
           Alignment · {alignmentChange.initial} → {alignmentChange.final}
+        </span>
+      )}
+      {runtimeState && (
+        <span
+          style={runtimeAccent
+            ? { ...chip, color: runtimeAccent.color, background: runtimeAccent.bg, border: `1px solid ${runtimeAccent.border}` }
+            : chip}
+          title="Runtime governance state (backend-owned)"
+        >
+          Runtime · {runtimeState}
+        </span>
+      )}
+      {recommendedAction && (
+        <span style={chip} title="Recommended action (backend-owned)">
+          Action · {recommendedAction}
         </span>
       )}
       {hardConstraintTriggered && (
@@ -133,6 +162,8 @@ export default function App() {
           riskLabel={viewModel.riskLabel}
           hardConstraintTriggered={viewModel.hardConstraintTriggered}
           alignmentChange={viewModel.alignmentChange}
+          runtimeState={viewModel.runtimeState}
+          recommendedAction={viewModel.recommendedAction}
         />
         <RunScenarioCard
           onRunScenario0={() => selectScenario(0)}
