@@ -14,6 +14,13 @@ with no business logic. Nothing here imports or modifies the V3 engine/API.
 from __future__ import annotations
 
 from .agent import DEMO_GOAL, Agent, AgentStep, run_demo
+from .contracts import (
+    build_approval_request,
+    build_decision_record,
+    build_pending_approval,
+    build_run_summary,
+    build_trace_entry,
+)
 from .controller import Controller
 from .executor import Executor
 from .ledger import WorkflowLedger
@@ -64,4 +71,10 @@ __all__ = [
     "AgentStep",
     "DEMO_GOAL",
     "run_demo",
+    # Section 7 frontend contracts
+    "build_decision_record",
+    "build_pending_approval",
+    "build_trace_entry",
+    "build_run_summary",
+    "build_approval_request",
 ]
