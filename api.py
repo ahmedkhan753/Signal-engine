@@ -47,7 +47,7 @@ SCENARIO_METADATA = {
     "orchestration_conflict":      {"demo_step": None,          "demo_order": None},
     "rollback_trigger":            {"demo_step": None,          "demo_order": None},
     "security_concern":            {"demo_step": None,          "demo_order": None},
-    "recovery_validation":         {"demo_step": None,          "demo_order": None},
+    "recovery_validation":         {"demo_step": "Recovery",    "demo_order": 5},
 }
 
 # --------------------------------------------------------------------------
