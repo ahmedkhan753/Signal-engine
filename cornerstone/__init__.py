@@ -14,6 +14,7 @@ with no business logic. Nothing here imports or modifies the V3 engine/API.
 from __future__ import annotations
 
 from .agent import DEMO_GOAL, Agent, AgentStep, run_demo
+from .api import cornerstone_bp
 from .contracts import (
     build_approval_request,
     build_decision_record,
@@ -77,4 +78,6 @@ __all__ = [
     "build_trace_entry",
     "build_run_summary",
     "build_approval_request",
+    # Runtime API
+    "cornerstone_bp",
 ]
