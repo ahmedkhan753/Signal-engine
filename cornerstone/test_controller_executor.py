@@ -15,7 +15,6 @@ from cornerstone.controller import Controller
 from cornerstone.executor import Executor
 from cornerstone.ledger import WorkflowLedger
 from cornerstone.models import (
-    Decision,
     ExecutorResult,
     ProposedAction,
     SessionContext,

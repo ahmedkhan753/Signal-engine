@@ -7,14 +7,20 @@ actually carried out: PolicyGate rules on it, the Executor performs it, the
 QueueManager holds deferred actions for human approval, and the WorkflowLedger
 records every step.
 
-Phase 1 is architecture only — typed models, enums, and placeholder components
-with no business logic. Nothing here imports or modifies the V3 engine/API.
+Phase 1 is a complete, deterministic, in-memory implementation: the enforcement
+loop (agent -> controller -> gate -> executor/queue), the human approval runtime,
+the ledger audit trail, the Section 7 serialization contracts, the runtime API
+blueprint, and an acceptance validator + demo runner. Nothing here imports or
+modifies the VECTOR V3 engine/API.
 """
 
 from __future__ import annotations
 
+from .acceptance import validate_phase1
 from .agent import DEMO_GOAL, Agent, AgentStep, run_demo
 from .api import cornerstone_bp
+from .demo_runner import build_report as build_demo_report
+from .demo_runner import run as run_demo_report
 from .contracts import (
     build_approval_request,
     build_decision_record,
@@ -80,4 +86,8 @@ __all__ = [
     "build_approval_request",
     # Runtime API
     "cornerstone_bp",
+    # Acceptance + demo
+    "validate_phase1",
+    "build_demo_report",
+    "run_demo_report",
 ]

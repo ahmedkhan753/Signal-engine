@@ -138,7 +138,7 @@ class TestDecisionRecording(unittest.TestCase):
     def test_denial_records_killed_fate(self) -> None:
         ctrl = make_controller()
         item = queue_one(ctrl)
-        decision = ctrl.deny(item.approval_id, CRED)
+        ctrl.deny(item.approval_id, CRED)
         self.assertEqual(ctrl.approval_audit[0].resulting_fate, ExecutorResult.KILLED)
         self.assertEqual(ctrl.approval_audit[0].user_credential, CRED)
 

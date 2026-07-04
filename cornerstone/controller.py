@@ -36,7 +36,6 @@ from .executor import Executor
 from .ledger import WorkflowLedger
 from .models import (
     ApprovalDecision,
-    ApprovalStatus,
     Decision,
     DecisionRecord,
     ExecutorResult,
