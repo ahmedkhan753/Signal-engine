@@ -1,0 +1,19 @@
+{
+  "client_name": "CORNERSTONE",
+  "logo": "assets/cornerstone-logo.svg",
+  "panel_titles": {
+    "trace": "Governance Trace",
+    "pending": "Pending Human Approvals",
+    "summary": "Run Summary",
+    "decisions": "Decision Detail"
+  },
+  "labels": {
+    "approve": "Approve",
+    "deny": "Deny",
+    "allow": "Allowed",
+    "block": "Blocked",
+    "delay": "Held for Approval"
+  },
+  "scenario_framing": "Every autonomous action is independently governed by the policy gate before it can execute.",
+  "narrative": "CORNERSTONE demonstrates a mandatory enforcement seam: an agent proposes actions toward a goal, and the policy gate decides ALLOW, DELAY (human approval), or BLOCK before anything runs."
+}

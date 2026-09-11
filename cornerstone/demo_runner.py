@@ -125,7 +125,9 @@ def build_report() -> Tuple[str, bool]:
     line(f"DELAY: {summary['total_delay']}")
     line(f"BLOCK: {summary['total_block']}")
     line()
-    line(f"Human interventions: {summary['workflow_counts'][0]['human_interventions']}")
+    wf_counts = summary["workflow_counts"][0]
+    line(f"Human interventions (DELAY): {wf_counts['human_interventions']}")
+    line(f"Autonomous denials (BLOCK): {wf_counts['autonomous_denials']}")
     line()
 
     verdict = validate_phase1()
@@ -147,5 +149,30 @@ def run(printer=print) -> bool:
 
 
 if __name__ == "__main__":  # pragma: no cover
+    import argparse
     import sys
+
+    parser = argparse.ArgumentParser(description="CORNERSTONE Phase 1 demo runner")
+    parser.add_argument(
+        "--mode",
+        choices=("deterministic", "autonomous", "concurrency"),
+        default="deterministic",
+        help="deterministic acceptance demo (default), autonomous agent demo, "
+             "or non-blocking multi-workflow demo",
+    )
+    parser.add_argument(
+        "--scenario",
+        default=None,
+        help="vertical scenario id for --mode autonomous "
+             "(financial_tech | medical_tech | insurance_tech). "
+             "Omit for the generic autonomous demo.",
+    )
+    args = parser.parse_args()
+
+    if args.mode == "autonomous":
+        from .autonomous import run_autonomous
+        sys.exit(0 if run_autonomous(scenario_id=args.scenario) else 1)
+    if args.mode == "concurrency":
+        from .concurrency import run_concurrency
+        sys.exit(0 if run_concurrency() else 1)
     sys.exit(0 if run() else 1)

@@ -52,10 +52,17 @@ Components (all in `cornerstone/`): `agent.py`, `controller.py`, `policy_gate.py
 From the repository root:
 
 ```bash
-python -m cornerstone.demo_runner
+python -m cornerstone.demo_runner                 # deterministic acceptance demo
+python -m cornerstone.demo_runner --mode autonomous   # autonomous agent → BLOCK demo
+python -m cornerstone.demo_runner --mode autonomous --scenario financial_tech  # vertical
+python -m cornerstone.demo_runner --mode autonomous --scenario medical_tech    # vertical
+python -m cornerstone.demo_runner --mode autonomous --scenario insurance_tech  # vertical
+python -m cornerstone.demo_runner --mode concurrency  # non-blocking multi-workflow demo
 ```
 
-Exit code `0` = PASS, `1` = FAIL. The report is deterministic (no timestamps).
+Exit code `0` = PASS, `1` = FAIL. Every report is deterministic (no timestamps).
+See [README.md](README.md) for the full run guide, the API/Flask demo, and
+scenario/config selection.
 
 Programmatic use:
 
@@ -127,7 +134,8 @@ ALLOW: 1
 DELAY: 1
 BLOCK: 1
 
-Human interventions: 2
+Human interventions (DELAY): 1
+Autonomous denials (BLOCK): 1
 
 PASS
 ```
@@ -147,7 +155,7 @@ and covered by `test_acceptance.py`.
 | 4 | Denial kills execution | `denial_kills` | deny → fate KILLED, executor untouched |
 | 5 | Queue supports multiple pending | `queue_supports_multiple_pending` | 3 sensitive actions → 3 pending |
 | 6 | Non-blocking behavior | `non_blocking_behavior` | a DELAY parks; later action still flows |
-| 7 | Workflow intervention count | `workflow_intervention_count` | ledger + summary both report 2 |
+| 7 | Workflow intervention count | `workflow_intervention_count` | summary reports human_interventions=1 (DELAY), autonomous_denials=1 (BLOCK) |
 | 8 | Live state evaluated | `live_state_evaluated` | gate reads state each eval; snapshot filled |
 | 9 | Executor inaccessible to agent | `executor_inaccessible_to_agent` | no import / attribute / execute on agent |
 | 10 | Controller path mandatory | `controller_mandatory` | dispatch needs a decision; gate precedes exec; BLOCK guarded |

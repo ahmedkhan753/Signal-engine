@@ -10,7 +10,8 @@ the contracted keys — no more, no fewer.
 Rules honored here:
   * No business logic. Builders only serialize; they never decide anything.
   * No recomputation of ledger aggregates — ``build_run_summary`` consumes the
-    WorkflowLedger's own ``summary()`` / ``count_interventions()``.
+    WorkflowLedger's own ``summary()`` decision counts (DELAY -> human_interventions,
+    BLOCK -> autonomous_denials).
   * Deterministic: output is a pure function of the inputs (no clocks, no ids
     minted here).
   * In-memory only. No Flask, no endpoints, no persistence.
@@ -132,9 +133,17 @@ def build_run_summary(
     """
     Serialize one or more WorkflowLedgers to the frontend run-summary contract.
 
-    Consumes each ledger's own ``summary()`` and ``count_interventions()`` — no
-    aggregation is recomputed here. A ledger is scoped to a single workflow; its
-    ``session_id`` is used as the ``workflow_id`` key.
+    Consumes each ledger's own ``summary()`` decision counts — no aggregation is
+    recomputed from raw entries here. A ledger is scoped to a single workflow;
+    its ``session_id`` is used as the ``workflow_id`` key.
+
+    Intervention semantics (per workflow):
+      * ``human_interventions`` counts DELAY only — an action a human must rule
+        on. Approving or denying it later does NOT re-increment this count
+        (lifecycle trace entries carry no gate decision).
+      * ``autonomous_denials`` counts BLOCK — the gate refused it with no human
+        in the loop.
+      * ALLOW increments neither.
     """
     if isinstance(ledgers, WorkflowLedger):
         ledger_list: List[WorkflowLedger] = [ledgers]
@@ -145,12 +154,16 @@ def build_run_summary(
     workflow_counts: List[Dict[str, Any]] = []
     for ledger in ledger_list:
         decisions = ledger.summary()["decisions"]
-        total_allow += decisions.get("ALLOW", 0)
-        total_delay += decisions.get("DELAY", 0)
-        total_block += decisions.get("BLOCK", 0)
+        allow = decisions.get("ALLOW", 0)
+        delay = decisions.get("DELAY", 0)
+        block = decisions.get("BLOCK", 0)
+        total_allow += allow
+        total_delay += delay
+        total_block += block
         workflow_counts.append({
             "workflow_id": ledger.session_id,
-            "human_interventions": ledger.count_interventions(),
+            "human_interventions": delay,      # DELAY only
+            "autonomous_denials": block,       # BLOCK only
         })
 
     return {

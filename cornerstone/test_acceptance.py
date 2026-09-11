@@ -76,7 +76,9 @@ class TestIndividualCriteria(unittest.TestCase):
     def test_intervention_count(self) -> None:
         c = check(self.result, "workflow_intervention_count")
         self.assertTrue(c["passed"])
-        self.assertIn("summary=2", c["detail"])
+        # DELAY -> 1 human intervention; BLOCK -> 1 autonomous denial.
+        self.assertIn("human_interventions=1", c["detail"])
+        self.assertIn("autonomous_denials=1", c["detail"])
 
     def test_queue_behavior(self) -> None:
         self.assertTrue(check(self.result, "queue_supports_multiple_pending")["passed"])
@@ -106,7 +108,8 @@ class TestDemoRunner(unittest.TestCase):
             "BLOCK",
             "NOT EXECUTED",
             "Workflow Summary",
-            "Human interventions: 2",
+            "Human interventions (DELAY): 1",
+            "Autonomous denials (BLOCK): 1",
         ):
             self.assertIn(token, report)
 

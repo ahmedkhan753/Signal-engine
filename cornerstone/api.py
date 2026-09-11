@@ -25,14 +25,16 @@ from typing import List, Optional
 from flask import Blueprint, jsonify, request
 
 from .agent import DEMO_GOAL, Agent, AgentStep
+from .autonomous import autonomous_payload
 from .contracts import (
+    build_decision_record,
     build_pending_approval,
     build_run_summary,
     build_trace_entry,
 )
+from .config import build_config_payload, select_scenario
 from .controller import Controller
-from .models import SessionContext
-from .policy_rules import match_rule
+from .models import ProposedAction, SessionContext
 from .workflow import build_workflow
 
 cornerstone_bp = Blueprint("cornerstone", __name__, url_prefix="/cornerstone")
@@ -60,12 +62,36 @@ class _DemoSession:
 _session = _DemoSession()
 
 
-def _start_demo(goal: str = DEMO_GOAL) -> _DemoSession:
+def _reset_session() -> None:
     """
-    (Re)initialize the single demo session: fresh workflow + a scripted agent
-    run. Mirrors ``run_demo`` but retains the Controller so the stateful
-    approval endpoints can act on the same queue/ledger.
+    Clear the single demo session back to empty.
+
+    After reset the controller is None, so the read-only polling endpoints
+    (/pending, /summary, /decisions) return empty/zeroed results and cannot
+    recreate stale state. Only an explicit beat trigger (GET /demo or
+    GET /autonomous) creates a new session.
     """
+    _session.goal = DEMO_GOAL
+    _session.controller = None
+    _session.session_context = None
+    _session.steps = []
+
+
+def _start_demo(scenario_id: Optional[str] = None) -> _DemoSession:
+    """
+    (Re)initialize the single demo session, retaining the Controller so the
+    stateful approval endpoints act on the same queue/ledger.
+
+    Default (no scenario): the scripted acceptance agent runs ``triage_incident``
+    — behavior identical to before. With a ``scenario_id``, the selected (safe,
+    validated) scenario config supplies the context, goal, and demo actions,
+    which are proposed through the same enforcement core (the gate still rules
+    independently — config selects inputs, never the verdict).
+    """
+    if scenario_id:
+        return _start_scenario_demo(scenario_id)
+
+    goal = DEMO_GOAL
     controller = build_workflow(session_id=goal)
     context = SessionContext(
         session_id=goal,
@@ -84,6 +110,36 @@ def _start_demo(goal: str = DEMO_GOAL) -> _DemoSession:
     return _session
 
 
+def _start_scenario_demo(scenario_id: str) -> _DemoSession:
+    """Run a config-selected scenario's actions through the enforcement core."""
+    scenario = select_scenario(scenario_id)  # safe: falls back to a known-good default
+    controller = build_workflow(session_id=scenario.id)
+    context = SessionContext(
+        session_id=scenario.id,
+        workflow_id=scenario.id,
+        scenario_id=scenario.context.get("scenario_id", scenario.id),
+        runtime_state=scenario.context.get("runtime_state"),
+        risk_level=scenario.context.get("risk_level"),
+    )
+    for i, action in enumerate(scenario.actions):
+        controller.receive_action(
+            ProposedAction(
+                action_id=f"{scenario.id}-{i}",
+                action_type=action.action_type,
+                scenario_id=context.scenario_id,
+                source="scenario",
+                payload={"label": action.label, "goal": scenario.goal},
+            ),
+            context,
+        )
+
+    _session.goal = scenario.goal
+    _session.controller = controller
+    _session.session_context = context
+    _session.steps = []
+    return _session
+
+
 # --------------------------------------------------------------------------
 # Serialization helpers (contracts only)
 # --------------------------------------------------------------------------
@@ -97,12 +153,11 @@ def _serialize_trace(controller: Controller) -> list:
 
 def _serialize_pending(controller: Controller) -> list:
     wf = controller.ledger.session_id
+    # reason_held comes from the PendingApproval's stored gate reason (durable
+    # audit data set at enqueue time), so it is consistent before and after
+    # resolution rather than being re-derived here.
     return [
-        build_pending_approval(
-            item,
-            workflow_id=wf,
-            reason_held=match_rule(item.action.action_type).reason,
-        )
+        build_pending_approval(item, workflow_id=wf)
         for item in controller.queue_manager.pending()
     ]
 
@@ -116,8 +171,14 @@ def _error(message: str, status: int):
 # --------------------------------------------------------------------------
 @cornerstone_bp.get("/demo")
 def demo():
-    """Start (or restart) the demo and return its steps, summary, and pending set."""
-    session = _start_demo(DEMO_GOAL)
+    """
+    Start (or restart) the demo and return its steps, summary, and pending set.
+
+    Optional ``?scenario=<id>`` selects a config-driven scenario; without it, the
+    default scripted acceptance demo runs. The response shape is identical in
+    both cases.
+    """
+    session = _start_demo(request.args.get("scenario"))
     controller = session.controller
     return jsonify({
         "goal": session.goal,
@@ -125,6 +186,48 @@ def demo():
         "summary": build_run_summary(controller.ledger),
         "pending": _serialize_pending(controller),
     })
+
+
+@cornerstone_bp.get("/config")
+def config():
+    """
+    Return presentation config + the dropdown-ready scenario list for the
+    frontend. Degrades to known-good defaults if a config file is invalid.
+    """
+    return jsonify(build_config_payload())
+
+
+@cornerstone_bp.post("/reset")
+def reset():
+    """
+    Reset the presenter/demo session to empty (clean beat separation).
+
+    After reset the read-only endpoints (/pending, /summary, /decisions) return
+    empty/zeroed results and cannot recreate stale state by polling — only an
+    explicit beat trigger (/demo or /autonomous) starts a new session.
+    """
+    _reset_session()
+    return jsonify({"status": "reset", "active": False, "pending": []})
+
+
+@cornerstone_bp.get("/autonomous")
+def autonomous():
+    """
+    Run the autonomous agent as a discrete presenter step and return the
+    attempted (agent-derived) action, the gate's independent decision, and the
+    trace. Optional ``?scenario=<id>`` selects a vertical (Financial/Medical/
+    Insurance Tech); without it the generic autonomous demo runs.
+
+    The gate rules independently — the agent proposes, the PolicyGate decides.
+    The resulting controller is retained so /decisions and /summary reflect this
+    step.
+    """
+    controller, payload = autonomous_payload(request.args.get("scenario"))
+    _session.goal = payload["goal"]
+    _session.controller = controller
+    _session.session_context = None
+    _session.steps = []
+    return jsonify(payload)
 
 
 @cornerstone_bp.get("/pending")
@@ -141,6 +244,32 @@ def summary():
     if _session.controller is None:
         return jsonify(build_run_summary([]))
     return jsonify(build_run_summary(_session.controller.ledger))
+
+
+@cornerstone_bp.get("/decisions")
+def decisions():
+    """
+    List every retained gate DecisionRecord for the active session (Panel A
+    drill-down source). Empty list if no demo is running.
+    """
+    if _session.controller is None:
+        return jsonify({"items": []})
+    return jsonify({
+        "items": [
+            build_decision_record(record)
+            for record in _session.controller.decision_records()
+        ]
+    })
+
+
+@cornerstone_bp.get("/decisions/<action_id>")
+def decision_detail(action_id: str):
+    """Return the DecisionRecord for a single ``action_id``, or 404 if unknown."""
+    controller = _session.controller
+    record = controller.get_decision_record(action_id) if controller else None
+    if record is None:
+        return _error(f"Unknown action_id: {action_id}.", 404)
+    return jsonify(build_decision_record(record))
 
 
 @cornerstone_bp.post("/approve")

@@ -20,7 +20,7 @@ resume execution exactly once. In-memory only for Phase 1.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from .models import ApprovalStatus, PendingApproval, ProposedAction
 
@@ -36,14 +36,25 @@ class QueueManager:
         self._approvals: Dict[str, PendingApproval] = {}
         self._seq: int = 0
 
-    def enqueue(self, action: ProposedAction) -> PendingApproval:
-        """Park an action awaiting approval; return its PendingApproval."""
+    def enqueue(
+        self,
+        action: ProposedAction,
+        reason: Optional[str] = None,
+    ) -> PendingApproval:
+        """
+        Park an action awaiting approval; return its PendingApproval.
+
+        ``reason`` is the gate's reason for holding the action. It is stored as
+        durable audit data (``reason_held``) and is never mutated by a later
+        approve/deny — it must survive resolution.
+        """
         self._seq += 1
         approval = PendingApproval(
             approval_id=f"apr-{self._seq}",
             action=action,
             status=ApprovalStatus.PENDING,
             requested_at=_now_iso(),
+            reason=reason,
         )
         self._approvals[approval.approval_id] = approval
         return approval

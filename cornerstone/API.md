@@ -28,6 +28,21 @@ the API never calls the Executor or mutates the ledger directly.
 All response bodies use the Section 7 contracts. Enum values serialize as
 strings; timestamps are UTC ISO-8601.
 
+### Presenter / stepped flow
+
+For a stepped presenter, each "beat" is a discrete endpoint call:
+
+1. `POST /cornerstone/reset` — clear the session between beats.
+2. `GET /cornerstone/demo` (optionally `?scenario=<id>`) — run the scripted
+   governance beat (ALLOW/DELAY/BLOCK).
+3. `POST /cornerstone/approve` / `deny` — resolve the parked DELAY.
+4. `GET /cornerstone/autonomous?scenario=<id>` — run the autonomous beat.
+5. Read-only polling: `GET /cornerstone/pending` · `/summary` · `/decisions`.
+
+**Only `/demo` and `/autonomous` create state.** After `/reset`, the read-only
+polling endpoints return empty/zeroed results and cannot recreate stale state by
+polling. This keeps demo beats cleanly separated.
+
 ---
 
 ## GET `/cornerstone/demo`
@@ -53,7 +68,7 @@ run summary, and the current pending set.
   ],
   "summary": {
     "total_allow": 1, "total_delay": 1, "total_block": 1,
-    "workflow_counts": [ { "workflow_id": "triage_incident", "human_interventions": 2 } ]
+    "workflow_counts": [ { "workflow_id": "triage_incident", "human_interventions": 1, "autonomous_denials": 1 } ]
   },
   "pending": [
     { "id": "apr-1", "workflow_id": "triage_incident",
@@ -73,7 +88,8 @@ run summary, and the current pending set.
 ## GET `/cornerstone/pending`
 
 List the current pending-approval items (empty array if no demo is running).
-Each item is a **pending-approval contract**.
+Each item is a **pending-approval contract**. `reason_held` is the gate's stored
+reason for holding the item and survives resolution unchanged (see `CONTRACTS.md §2`).
 
 **Response:**
 ```json
@@ -137,7 +153,10 @@ body and error semantics as approve.
 ## GET `/cornerstone/summary`
 
 Return the **run-summary contract** for the active session (zeros + empty
-`workflow_counts` if no demo has been started).
+`workflow_counts` if no demo has been started). `human_interventions` counts
+**DELAY** (human-in-the-loop); `autonomous_denials` counts **BLOCK** (autonomous
+gate denial); ALLOW counts as neither. Resolving a DELAY later does not
+re-increment `human_interventions`.
 
 **Response:**
 ```json
@@ -145,9 +164,116 @@ Return the **run-summary contract** for the active session (zeros + empty
   "total_allow": 1,
   "total_delay": 1,
   "total_block": 1,
-  "workflow_counts": [ { "workflow_id": "triage_incident", "human_interventions": 2 } ]
+  "workflow_counts": [ { "workflow_id": "triage_incident", "human_interventions": 1, "autonomous_denials": 1 } ]
 }
 ```
+
+---
+
+## GET `/cornerstone/decisions`
+
+List every retained gate **decision record** for the active session — the source
+for the Panel A drill-down. Returns `{ "items": [] }` if no demo is running.
+Records persist for the whole session, so they remain available after an action
+is approved or denied.
+
+**Response:**
+```json
+{
+  "items": [
+    { "action_id": "triage_incident-0", "workflow_id": "triage_incident", "decision": "ALLOW",
+      "reason": "Action is a safe read with no side effects and is allowed.",
+      "rule_id": "SAFE_READ_ALLOW", "live_state": { "runtime_state": "STABLE", "read_at": "..." },
+      "timestamp": "...", "sequence_index": 1 },
+    { "action_id": "triage_incident-1", "decision": "DELAY", "rule_id": "SENSITIVE_DELAY", "...": "..." },
+    { "action_id": "triage_incident-2", "decision": "BLOCK", "rule_id": "DANGEROUS_BLOCK", "...": "..." }
+  ]
+}
+```
+
+## GET `/cornerstone/decisions/<action_id>`
+
+Return the single **decision record** for `action_id` (the full decision-record
+contract). Used by the frontend when a trace row is clicked.
+
+**Response** `200`: a decision-record object (see `CONTRACTS.md §1`).
+**Errors:** `404` unknown `action_id` → `{ "error": "..." }`.
+
+```json
+{
+  "action_id": "triage_incident-2",
+  "workflow_id": "triage_incident",
+  "decision": "BLOCK",
+  "reason": "Action is classified as dangerous/irreversible and is blocked.",
+  "rule_id": "DANGEROUS_BLOCK",
+  "live_state": { "runtime_state": "STABLE", "risk_level": "LOW", "read_at": "..." },
+  "timestamp": "...",
+  "sequence_index": 3
+}
+```
+
+---
+
+## POST `/cornerstone/reset`
+
+Reset the presenter/demo session to empty (clean separation between beats).
+After reset the read-only endpoints return empty/zeroed results and **cannot
+recreate stale state by polling** — only an explicit `/demo` or `/autonomous`
+call starts a new session.
+
+**Response** `200`:
+```json
+{ "status": "reset", "active": false, "pending": [] }
+```
+
+---
+
+## GET `/cornerstone/autonomous`
+
+Run the autonomous agent as a discrete presenter step. The agent independently
+derives an action from the goal + tool descriptions; the **PolicyGate decides
+independently** (the verdict is never supplied by the agent or config). Optional
+`?scenario=<id>` selects a vertical; without it, the generic autonomous demo runs.
+The resulting controller is retained, so `/decisions` and `/summary` reflect this
+step.
+
+Vertical → domain-appropriate attempted action (all independently **BLOCK**ed):
+
+| scenario | attempted action (agent-derived) | `action_type` | gate |
+|---|---|---|---|
+| `financial_tech` | unauthorized transfer (bypass fraud controls) | `disable_security_controls` | BLOCK |
+| `medical_tech` | bulk-export patient records | `drop_database` | BLOCK |
+| `insurance_tech` | delete claim audit trail to auto-approve | `delete_system_file` | BLOCK |
+
+**Response** `200`:
+```json
+{
+  "scenario": "financial_tech",
+  "goal": "immediately move the flagged client funds out of the settlement account, bypassing the blocked-payment controls",
+  "attempted_action": {
+    "action_id": "auto-1",
+    "action_type": "disable_security_controls",
+    "label": "Force an unauthorized transfer by bypassing fraud controls"
+  },
+  "reasoning": [
+    { "tool": "disable_security_controls", "label": "Force an unauthorized transfer by bypassing fraud controls", "score": 8 },
+    { "tool": "read_status", "label": "Read settlement batch status", "score": 1 },
+    { "tool": "approve_payment", "label": "Release a vendor payment", "score": 1 }
+  ],
+  "decision": { "action_id": "auto-1", "decision": "BLOCK", "rule_id": "DANGEROUS_BLOCK", "reason": "...", "live_state": { "...": "..." }, "workflow_id": "autonomous-financial_tech", "timestamp": "...", "sequence_index": 1 },
+  "executed": false,
+  "trace": [ { "event_type": "BLOCKED", "action_id": "auto-1", "decision": "BLOCK", "...": "..." } ]
+}
+```
+
+The `decision` object is the full **decision-record contract** (`CONTRACTS.md §1`);
+`trace` entries are **trace contracts** (`CONTRACTS.md §3`). Both reuse the
+existing serializers — no duplicated serialization.
+
+> **Honesty note.** The autonomous agent is a **local deterministic reasoning
+> simulator, not an LLM**. It genuinely derives the action by lexical scoring of
+> tool descriptions against the goal (different goals → different actions); it is
+> not handed the target action, and the gate rules independently.
 
 ---
 
@@ -155,13 +281,63 @@ Return the **run-summary contract** for the active session (zeros + empty
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/cornerstone/demo` | start/restart the demo; returns steps + summary + pending |
+| GET | `/cornerstone/demo` | start/restart the demo (`?scenario=<id>` optional); steps + summary + pending |
 | GET | `/cornerstone/pending` | list pending-approval items |
 | POST | `/cornerstone/approve` | approve → resume execution (EXECUTED) |
 | POST | `/cornerstone/deny` | deny → kill execution (KILLED) |
-| GET | `/cornerstone/summary` | run summary aggregates |
+| GET | `/cornerstone/summary` | run summary aggregates (DELAY vs BLOCK counts) |
+| GET | `/cornerstone/decisions` | list retained decision records (Panel A source) |
+| GET | `/cornerstone/decisions/<action_id>` | single decision record; `404` if unknown |
+| GET | `/cornerstone/config` | presentation config + scenario dropdown list |
+| POST | `/cornerstone/reset` | clear the session between presenter beats |
+| GET | `/cornerstone/autonomous` | autonomous step (`?scenario=<id>`); agent-derived action → gate BLOCK |
 
 The request body for `/approve` and `/deny` matches the **approval-request
 contract** (`build_approval_request`): `{ queue_item_id, verdict, user_credential }`
 — the endpoint infers `verdict` from the route, so the body needs only
 `queue_item_id` (+ optional `user_credential`).
+
+---
+
+## Frontend coordination (stepped presenter)
+
+The endpoints below are everything the presenter walkthrough needs. **No new
+endpoint is required for the autonomous / score-table beat — it reuses the
+existing `GET /cornerstone/autonomous`.** All response bodies are the same
+Section 7 contracts documented above; enums serialize as strings.
+
+| Presenter action | Method + path | Query / body | Returns |
+|---|---|---|---|
+| Reset (between runs) | `POST /cornerstone/reset` | — | `{ status, active:false, pending:[] }` |
+| Deterministic demo beat | `GET /cornerstone/demo` | `?scenario=<id>` (optional) | `{ goal, steps, summary, pending }` |
+| Autonomous / score-table beat | `GET /cornerstone/autonomous` | `?scenario=<id>` (optional) | `{ scenario, goal, attempted_action, reasoning, decision, executed, trace }` |
+| Pending approvals | `GET /cornerstone/pending` | — | `{ items:[pending-approval] }` |
+| Approve | `POST /cornerstone/approve` | `{ queue_item_id }` | `{ decision, result, trace }` |
+| Deny | `POST /cornerstone/deny` | `{ queue_item_id }` | `{ decision, result, trace }` |
+| Decision drill-down (list) | `GET /cornerstone/decisions` | — | `{ items:[decision-record] }` |
+| Decision drill-down (one) | `GET /cornerstone/decisions/<action_id>` | — | decision-record · `404` if unknown |
+| Run summary | `GET /cornerstone/summary` | — | `{ total_allow, total_delay, total_block, workflow_counts[] }` |
+| Config + scenario list | `GET /cornerstone/config` | — | `{ presentation, scenarios[] }` |
+
+**Recommended beat sequence**
+
+1. `GET /cornerstone/config` — load client name, labels, scenario dropdown (once).
+2. `POST /cornerstone/reset` — clean slate for a run.
+3. `GET /cornerstone/demo?scenario=<id>` — governance beat (ALLOW → DELAY → BLOCK).
+4. `GET /cornerstone/pending` → `POST /cornerstone/approve` (or `/deny`) — resolve the DELAY.
+5. `GET /cornerstone/autonomous?scenario=<id>` — autonomous beat: `attempted_action`
+   (agent-derived) + `reasoning` (the score table) + `decision` (gate BLOCK).
+6. Poll `GET /cornerstone/decisions`, `/summary`, `/pending` for panel state after
+   any beat. These are **read-only** — after `/reset` they return empty/zeroed and
+   never recreate state, so polling is safe between beats.
+
+**Scenario ids:** `financial_tech`, `medical_tech`, `insurance_tech` (from
+`GET /cornerstone/config`). An unknown/missing id falls back to a known-good
+default. Each vertical's autonomous beat derives a different domain-appropriate
+action (see the `GET /cornerstone/autonomous` table above), and the PolicyGate
+independently returns the verdict — the frontend never computes governance logic.
+
+**Note on hosting:** the CORNERSTONE blueprint (`cornerstone_bp`) is additive and
+must be registered on a Flask app by the host (see the top of this document).
+This package does not ship a standalone host app or CORS configuration; if the
+integrated environment adds those, they live in that host layer, not here.

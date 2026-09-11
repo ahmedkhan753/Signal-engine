@@ -149,6 +149,32 @@ class TestPendingApprovalContract(unittest.TestCase):
             build_pending_approval(item, workflow_id="wf-1"),
         )
 
+    # -- reason_held audit survival (Track 3) -------------------------------
+    ORIGINAL_REASON = "Action is sensitive and is deferred for human approval."
+
+    def test_reason_held_present_while_pending(self) -> None:
+        ctrl = make_controller()
+        item = queued_item(ctrl)  # gate reason stored at enqueue time
+        out = build_pending_approval(item, workflow_id="wf-1")
+        self.assertEqual(out["reason_held"], self.ORIGINAL_REASON)
+
+    def test_reason_held_survives_approval(self) -> None:
+        ctrl = make_controller()
+        item = queued_item(ctrl)
+        ctrl.approve(item.approval_id, CRED)
+        out = build_pending_approval(item, workflow_id="wf-1")
+        # Audit info is never erased during resolution.
+        self.assertEqual(out["reason_held"], self.ORIGINAL_REASON)
+        self.assertEqual(out["status"], "APPROVED")
+
+    def test_reason_held_survives_denial(self) -> None:
+        ctrl = make_controller()
+        item = queued_item(ctrl)
+        ctrl.deny(item.approval_id, CRED)
+        out = build_pending_approval(item, workflow_id="wf-1")
+        self.assertEqual(out["reason_held"], self.ORIGINAL_REASON)
+        self.assertEqual(out["status"], "DENIED")
+
 
 class TestTraceEntryContract(unittest.TestCase):
     KEYS = {
@@ -198,7 +224,11 @@ class TestRunSummaryContract(unittest.TestCase):
         self.assertEqual(out["total_allow"], 1)
         self.assertEqual(out["total_delay"], 1)
         self.assertEqual(out["total_block"], 1)
-        self.assertEqual(out["workflow_counts"], [{"workflow_id": "wf-1", "human_interventions": 2}])
+        # DELAY -> human_intervention; BLOCK -> autonomous_denial; ALLOW -> neither.
+        self.assertEqual(
+            out["workflow_counts"],
+            [{"workflow_id": "wf-1", "human_interventions": 1, "autonomous_denials": 1}],
+        )
         assert_json(self, out)
 
     def test_summary_accepts_multiple_ledgers(self) -> None:
@@ -217,6 +247,32 @@ class TestRunSummaryContract(unittest.TestCase):
         ctrl = make_controller()
         ctrl.receive_action(ProposedAction("a1", "read_status"), make_context())
         self.assertEqual(build_run_summary(ctrl.ledger), build_run_summary(ctrl.ledger))
+
+    # -- intervention semantics (Track 2) -----------------------------------
+    def test_allow_increments_neither(self) -> None:
+        ctrl = make_controller()
+        ctrl.receive_action(ProposedAction("a1", "read_status"), make_context())
+        wf = build_run_summary(ctrl.ledger)["workflow_counts"][0]
+        self.assertEqual(wf["human_interventions"], 0)
+        self.assertEqual(wf["autonomous_denials"], 0)
+
+    def test_delay_is_human_block_is_autonomous(self) -> None:
+        ctrl = make_controller()
+        ctrl.receive_action(ProposedAction("a1", "send_email"), make_context())          # DELAY
+        ctrl.receive_action(ProposedAction("a2", "delete_system_file"), make_context())  # BLOCK
+        wf = build_run_summary(ctrl.ledger)["workflow_counts"][0]
+        self.assertEqual(wf["human_interventions"], 1)   # DELAY only
+        self.assertEqual(wf["autonomous_denials"], 1)    # BLOCK only
+
+    def test_resolution_does_not_double_count(self) -> None:
+        ctrl = make_controller()
+        ctrl.receive_action(ProposedAction("a1", "send_email"), make_context())  # DELAY
+        item = ctrl.queue_manager.pending()[0]
+        ctrl.approve(item.approval_id, CRED)  # resume -> EXECUTED
+        wf = build_run_summary(ctrl.ledger)["workflow_counts"][0]
+        # Approving the DELAY'd item must not re-increment human_interventions.
+        self.assertEqual(wf["human_interventions"], 1)
+        self.assertEqual(wf["autonomous_denials"], 0)
 
 
 class TestApprovalRequestContract(unittest.TestCase):

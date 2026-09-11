@@ -104,13 +104,15 @@ def _check_non_blocking() -> CheckResult:
 
 
 def _check_intervention_count() -> CheckResult:
+    # DELAY counts as a human intervention; BLOCK counts as an autonomous denial.
+    # The demo produces exactly one of each (send_email DELAY, delete BLOCK).
     c = build_workflow(DEMO_GOAL)
     Agent(c).run(DEMO_GOAL, _ctx(DEMO_GOAL))
-    ledger_count = c.ledger.count_interventions()
-    summary = build_run_summary(c.ledger)
-    summary_count = summary["workflow_counts"][0]["human_interventions"]
-    ok = ledger_count == 2 and summary_count == 2
-    return ok, f"ledger={ledger_count}, summary={summary_count}"
+    wf = build_run_summary(c.ledger)["workflow_counts"][0]
+    human = wf["human_interventions"]
+    autonomous = wf["autonomous_denials"]
+    ok = human == 1 and autonomous == 1
+    return ok, f"human_interventions={human}, autonomous_denials={autonomous}"
 
 
 def _check_live_state_evaluated() -> CheckResult:

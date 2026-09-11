@@ -19,6 +19,24 @@ from __future__ import annotations
 from .acceptance import validate_phase1
 from .agent import DEMO_GOAL, Agent, AgentStep, run_demo
 from .api import cornerstone_bp
+from .autonomous import (
+    AUTONOMOUS_GOAL,
+    AutonomousAgent,
+    autonomous_payload,
+    build_autonomous_report,
+    build_scenario_autonomous_report,
+    run_autonomous,
+    run_scenario_autonomous,
+)
+from .concurrency import build_concurrency_report, run_concurrency
+from .config import (
+    ConfigValidationError,
+    build_config_payload,
+    discover_scenarios,
+    load_presentation_safe,
+    select_scenario,
+)
+from .tool_catalog import DEFAULT_TOOL_CATALOG, ToolSpec
 from .demo_runner import build_report as build_demo_report
 from .demo_runner import run as run_demo_report
 from .contracts import (
@@ -90,4 +108,23 @@ __all__ = [
     "validate_phase1",
     "build_demo_report",
     "run_demo_report",
+    # Autonomous agent demo
+    "AutonomousAgent",
+    "AUTONOMOUS_GOAL",
+    "build_autonomous_report",
+    "build_scenario_autonomous_report",
+    "run_scenario_autonomous",
+    "autonomous_payload",
+    "run_autonomous",
+    "ToolSpec",
+    "DEFAULT_TOOL_CATALOG",
+    # Non-blocking multi-workflow demo
+    "build_concurrency_report",
+    "run_concurrency",
+    # Configuration layer
+    "build_config_payload",
+    "discover_scenarios",
+    "select_scenario",
+    "load_presentation_safe",
+    "ConfigValidationError",
 ]

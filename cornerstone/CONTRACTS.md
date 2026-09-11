@@ -20,6 +20,10 @@ contract tests in [`test_contracts.py`](test_contracts.py) enforce.
 ## 1. Decision Record — `build_decision_record(record)`
 
 The gate's ruling on one proposed action. Maps directly from `DecisionRecord`.
+Exposed to the frontend (Panel A drill-down) via `GET /cornerstone/decisions`
+(list) and `GET /cornerstone/decisions/<action_id>` (lookup) — see `API.md`.
+Decision records are retained for the whole session, so a trace row can be
+expanded to its decision detail even after the action has been approved/denied.
 
 | field | type | description |
 |---|---|---|
@@ -101,14 +105,19 @@ carry them itself).
 }
 ```
 
+> **`reason_held` is durable audit data and survives resolution.** It is the
+> gate's reason for holding the action, stored on the queue item at enqueue
+> time. Approving or denying an item **never** erases it — an APPROVED or DENIED
+> item still carries the original `reason_held`.
+
 **APPROVED** (same structure; denial is identical with `status: "DENIED"`,
-`verdict: "DENIED"`, `resulting_fate: "KILLED"`):
+`verdict: "DENIED"`, `resulting_fate: "KILLED"`). Note `reason_held` is retained:
 ```json
 {
   "id": "apr-1",
   "workflow_id": "wf-1",
-  "proposed_action": { "action_id": "act-2", "action_type": "send_email", "source": null, "scenario_id": null, "risk_level": null, "payload": {} },
-  "reason_held": null,
+  "proposed_action": { "action_id": "act-2", "action_type": "send_email", "source": "agent", "scenario_id": "stable_deployment", "risk_level": null, "payload": {} },
+  "reason_held": "Action is sensitive and is deferred for human approval.",
   "timestamp": "2026-07-04T08:02:14.218451+00:00",
   "status": "APPROVED",
   "resolution": {
@@ -156,9 +165,17 @@ One append-only audit event from the WorkflowLedger. `workflow_id` and
 ## 4. Run Summary — `build_run_summary(ledgers)`
 
 Aggregate view for the dashboard header. Accepts one `WorkflowLedger` or an
-iterable of them, and **consumes each ledger's own `summary()` /
-`count_interventions()`** — no counts are recomputed here. A ledger is scoped to
-one workflow; its `session_id` is used as the `workflow_id`.
+iterable of them, and **consumes each ledger's own `summary()` decision counts**
+— no counts are recomputed from raw entries here. A ledger is scoped to one
+workflow; its `session_id` is used as the `workflow_id`.
+
+**Intervention semantics** (per workflow):
+- `human_interventions` counts **DELAY only** — actions a human must rule on.
+  Approving/denying one later does **not** re-increment it (lifecycle trace
+  entries carry no gate decision, so there is no double-counting).
+- `autonomous_denials` counts **BLOCK only** — the gate refused it with no human
+  in the loop.
+- ALLOW increments neither.
 
 | field | type | description |
 |---|---|---|
@@ -167,7 +184,8 @@ one workflow; its `session_id` is used as the `workflow_id`.
 | `total_block` | number | total BLOCK decisions across ledgers |
 | `workflow_counts` | array | per-workflow rows |
 | `workflow_counts[].workflow_id` | string | the workflow id |
-| `workflow_counts[].human_interventions` | number | intervention count (BLOCK/DELAY) for that workflow |
+| `workflow_counts[].human_interventions` | number | DELAY count (human-in-the-loop) for that workflow |
+| `workflow_counts[].autonomous_denials` | number | BLOCK count (autonomous gate denial) for that workflow |
 
 ```json
 {
@@ -175,7 +193,7 @@ one workflow; its `session_id` is used as the `workflow_id`.
   "total_delay": 1,
   "total_block": 1,
   "workflow_counts": [
-    { "workflow_id": "wf-1", "human_interventions": 2 }
+    { "workflow_id": "wf-1", "human_interventions": 1, "autonomous_denials": 1 }
   ]
 }
 ```
@@ -184,8 +202,10 @@ one workflow; its `session_id` is used as the `workflow_id`.
 
 ## 5. Approval Request — `build_approval_request(queue_item_id, verdict, user_credential="demo-user")`
 
-The **request-body shape** for the future approval endpoint. Shape definition
-only — there is no endpoint yet.
+The **request-body shape** for the approval endpoints (`POST /cornerstone/approve`
+and `POST /cornerstone/deny`). The endpoint infers `verdict` from the route, so
+the live request body needs only `queue_item_id` (+ optional `user_credential`);
+this builder documents the full canonical shape. See `API.md`.
 
 | field | type | description |
 |---|---|---|

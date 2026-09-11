@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .executor import Executor
 from .ledger import WorkflowLedger
@@ -76,6 +76,12 @@ class Controller:
         self.ledger = ledger
         # Audit trail of human approval rulings (in-memory, chronological).
         self.approval_audit: List[ApprovalDecision] = []
+        # Decision-record store for Panel A drill-down. Every gate ruling is
+        # retained (chronological list + by-action_id index) so a trace row can
+        # be expanded to its full DecisionRecord after the demo/approve/deny
+        # lifecycle. This is read-only bookkeeping; it never affects routing.
+        self._decision_records: List[DecisionRecord] = []
+        self._decision_by_action: Dict[str, DecisionRecord] = {}
 
     # ----------------------------------------------------------------------
     # Mandatory enforcement path (unchanged behavior)
@@ -87,6 +93,7 @@ class Controller:
     ) -> ExecutorResult:
         """Intake -> gate -> dispatch, recording a TraceEntry for every action."""
         decision_record = self.evaluate(proposed_action, session_context)
+        self._retain_decision(proposed_action, decision_record)
         result = self.dispatch(proposed_action, decision_record)
         self._record_decision(proposed_action, session_context, decision_record, result)
         return result
@@ -112,7 +119,9 @@ class Controller:
             return ExecutorResult.BLOCKED
 
         if decision.decision is Decision.DELAY:
-            self.queue_manager.enqueue(proposed_action)
+            # Persist the gate's reason as durable audit data (reason_held) so it
+            # survives the later approve/deny resolution.
+            self.queue_manager.enqueue(proposed_action, reason=decision.reason)
             return ExecutorResult.WAITING
 
         return ExecutorResult.BLOCKED
@@ -151,6 +160,26 @@ class Controller:
         )
 
         return self._audit(approval, ExecutorResult.KILLED)
+
+    # ----------------------------------------------------------------------
+    # Decision-record store (Panel A drill-down)
+    # ----------------------------------------------------------------------
+    def _retain_decision(
+        self,
+        proposed_action: ProposedAction,
+        decision_record: DecisionRecord,
+    ) -> None:
+        """Retain a gate ruling for later drill-down by action_id (last wins)."""
+        self._decision_records.append(decision_record)
+        self._decision_by_action[proposed_action.action_id] = decision_record
+
+    def decision_records(self) -> List[DecisionRecord]:
+        """Return every retained gate ruling, in chronological order."""
+        return list(self._decision_records)
+
+    def get_decision_record(self, action_id: str) -> Optional[DecisionRecord]:
+        """Return the retained gate ruling for ``action_id``, or None if unknown."""
+        return self._decision_by_action.get(action_id)
 
     # ----------------------------------------------------------------------
     # Ledger / audit helpers
